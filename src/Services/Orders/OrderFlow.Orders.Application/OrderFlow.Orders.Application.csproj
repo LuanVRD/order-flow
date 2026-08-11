@@ -1,8 +1,12 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\OrderFlow.Orders.Domain\OrderFlow.Orders.Domain.csproj" />
     <ProjectReference Include="..\..\..\BuildingBlocks\OrderFlow.Messaging.Contracts\OrderFlow.Messaging.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" Version="11.11.0" />
   </ItemGroup>
 
   <PropertyGroup>
