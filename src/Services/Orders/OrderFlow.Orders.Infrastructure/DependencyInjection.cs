@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OrderFlow.Orders.Application.Interfaces;
+using OrderFlow.Orders.Infrastructure.Messaging;
 using OrderFlow.Orders.Infrastructure.Persistence;
 using OrderFlow.Orders.Infrastructure.Persistence.Repositories;
 
@@ -11,6 +12,14 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
+        services.AddScoped<IOrderRepository, OrderRepository>();
+        services.AddScoped<IEventPublisher, LoggingEventPublisher>();
+
+        if (services.Any(sd => sd.ServiceType == typeof(DbContextOptions<OrdersDbContext>)))
+        {
+            return services;
+        }
+
         var connectionString = configuration.GetConnectionString("DefaultConnection")
             ?? configuration["ConnectionStrings:DefaultConnection"];
 
@@ -19,10 +28,18 @@ public static class DependencyInjection
             throw new InvalidOperationException("Connection string 'DefaultConnection' was not found.");
         }
 
-        services.AddDbContext<OrdersDbContext>(options =>
-            options.UseNpgsql(connectionString));
-
-        services.AddScoped<IOrderRepository, OrderRepository>();
+        if (connectionString.Contains("DataSource=", StringComparison.OrdinalIgnoreCase) ||
+            connectionString.Contains("Data Source=", StringComparison.OrdinalIgnoreCase) ||
+            connectionString.EndsWith(".db", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddDbContext<OrdersDbContext>(options =>
+                options.UseSqlite(connectionString));
+        }
+        else
+        {
+            services.AddDbContext<OrdersDbContext>(options =>
+                options.UseNpgsql(connectionString));
+        }
 
         return services;
     }
