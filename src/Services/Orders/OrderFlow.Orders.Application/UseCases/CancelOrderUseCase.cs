@@ -38,12 +38,9 @@ public class CancelOrderUseCase
 
         await _repository.SaveChangesAsync(cancellationToken);
 
-        var statusChangedEvent = new EventEnvelope<OrderStatusChangedEvent>(
-            Guid.NewGuid(),
-            "OrderStatusChanged",
-            DateTimeOffset.UtcNow,
-            1,
-            new OrderStatusChangedEvent(
+        var statusChangedEvent = EventEnvelope<OrderStatusChangedIntegrationEvent>.Create(
+            eventType: "OrderStatusChanged",
+            data: new OrderStatusChangedIntegrationEvent(
                 order.Id,
                 previousStatus.ToString(),
                 order.Status.ToString(),
@@ -52,12 +49,9 @@ public class CancelOrderUseCase
         );
         await _eventPublisher.PublishAsync(statusChangedEvent, "order.status.changed", cancellationToken);
 
-        var cancelledEvent = new EventEnvelope<OrderCancelledEvent>(
-            Guid.NewGuid(),
-            "OrderCancelled",
-            DateTimeOffset.UtcNow,
-            1,
-            new OrderCancelledEvent(order.Id, previousStatus.ToString(), order.UpdatedAt ?? DateTimeOffset.UtcNow)
+        var cancelledEvent = EventEnvelope<OrderCancelledIntegrationEvent>.Create(
+            eventType: "OrderCancelled",
+            data: new OrderCancelledIntegrationEvent(order.Id, previousStatus.ToString(), order.UpdatedAt ?? DateTimeOffset.UtcNow)
         );
         await _eventPublisher.PublishAsync(cancelledEvent, "order.cancelled", cancellationToken);
 

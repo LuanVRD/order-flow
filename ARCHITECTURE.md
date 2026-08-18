@@ -43,8 +43,61 @@ A direção das dependências no projeto respeita rigorosamente a regra das cama
 
 ---
 
-## 3. Padrões Distribuídos
+## 3. Comunicação Assíncrona e Eventos
 
-- **Envelope Padrão de Eventos**: Todos os eventos seguem a estrutura padrão com `eventId`, `eventType`, `occurredAt`, `version` e `data`.
+### 3.1 Domain Events vs. Integration Events
+
+O OrderFlow estabelece uma separação clara entre **Domain Events** (eventos internos ao domínio) e **Integration Events** (eventos de integração entre microsserviços):
+
+| Característica | Domain Event (`OrderFlow.*.Domain.Events`) | Integration Event (`OrderFlow.Messaging.Contracts.Events`) |
+| :--- | :--- | :--- |
+| **Escopo** | Intra-processo, restrito ao mesmo Bounded Context (ex.: dentro do microsserviço de Orders). | Inter-processo / Distribuído, compartilhado entre múltiplos Bounded Contexts (Orders -> Notifications). |
+| **Acoplamento** | Acoplado aos tipos e entidades do Domínio (`OrderStatus`, etc.). Não deve sair do domínio. | 100% desacoplado de entidades de domínio. Utiliza apenas tipos primitivos/escalares e DTOs imutáveis. |
+| **Transporte** | Disparado e tratado em memória (síncrono ou assíncrono local) dentro da mesma transação/Unit of Work. | Serializado (JSON) e publicado assincronamente através de um message broker (RabbitMQ). |
+| **Finalidade** | Notificar outras partes do mesmo agregado/domínio sobre regras de negócio que mudaram de estado. | Notificar outros sistemas/microsserviços sobre fatos consumados de interesse corporativo. |
+| **Versionamento** | Raro/desnecessário (refatorado junto com o código da aplicação). | Obrigatório e explícito (`version: 1`), pois múltiplos consumidores externos dependem do contrato estável. |
+| **Rastreabilidade** | Contextual à execução da thread/tarefa corrente. | Exige envelope com metadados distribuídos (`EventId`, `CorrelationId`, `OccurredAt`). |
+
+### 3.2 Estrutura do Envelope de Integração (`EventEnvelope<T>`)
+
+Para garantir interoperabilidade e rastreabilidade entre microsserviços sem compartilhar modelos de dados complexos, todas as mensagens transitam encapsuladas em um envelope padronizado:
+
+```json
+{
+  "eventId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "eventType": "OrderCreated",
+  "occurredAt": "2026-08-18T12:00:00Z",
+  "version": 1,
+  "correlationId": "req-987654321",
+  "data": {
+    "orderId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "customerName": "John Doe",
+    "customerEmail": "john.doe@example.com",
+    "totalAmount": 150.00,
+    "status": "Pending",
+    "createdAt": "2026-08-18T12:00:00Z"
+  }
+}
+```
+
+- **`EventId`**: Identificador único global do evento para controle de deduplicação e idempotência no consumidor.
+- **`EventType`**: String descritiva da intenção/evento para roteamento e serialização polimórfica.
+- **`OccurredAt`**: Timestamp UTC do momento em que o evento ocorreu.
+- **`Version`**: Versão do contrato de dados (versão inicial: `1`).
+- **`CorrelationId`**: Identificador de rastreamento ponta a ponta (Tracing distribuído).
+- **`Data`**: Payload específico do evento com dados enxutos e estritamente necessários.
+
+### 3.3 Contratos de Eventos de Integração Disponíveis
+
+- **`OrderCreatedIntegrationEvent`**: `(Guid OrderId, string CustomerName, string CustomerEmail, decimal TotalAmount, string Status, DateTimeOffset CreatedAt)`
+- **`OrderStatusChangedIntegrationEvent`**: `(Guid OrderId, string PreviousStatus, string NewStatus, DateTimeOffset ChangedAt)`
+- **`OrderCompletedIntegrationEvent`**: `(Guid OrderId, DateTimeOffset CompletedAt)`
+- **`OrderCancelledIntegrationEvent`**: `(Guid OrderId, string PreviousStatus, DateTimeOffset CancelledAt, string? Reason = null)`
+
+---
+
+## 4. Padrões Distribuídos
+
 - **Idempotência**: O consumidor consulta e registra o `eventId` na tabela `ProcessedMessages` antes de processar, evitando duplicidade de efeitos colaterais em reentregas.
 - **Tratamento de Erros e DLQ**: Falhas transitórias no consumidor são retentadas em até N vezes. Persistindo a falha, a mensagem é encaminhada para `orderflow.notifications.dlq`.
+

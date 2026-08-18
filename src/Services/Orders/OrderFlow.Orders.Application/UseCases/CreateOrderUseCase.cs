@@ -31,12 +31,9 @@ public class CreateOrderUseCase
         await _repository.AddAsync(order, cancellationToken);
         await _repository.SaveChangesAsync(cancellationToken);
 
-        var integrationEvent = new EventEnvelope<OrderCreatedEvent>(
-            Guid.NewGuid(),
-            "OrderCreated",
-            DateTimeOffset.UtcNow,
-            1,
-            new OrderCreatedEvent(
+        var integrationEvent = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
+            eventType: "OrderCreated",
+            data: new OrderCreatedIntegrationEvent(
                 order.Id,
                 order.CustomerName,
                 order.CustomerEmail,

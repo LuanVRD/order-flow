@@ -39,12 +39,9 @@ public class ChangeOrderStatusUseCase
 
         await _repository.SaveChangesAsync(cancellationToken);
 
-        var statusChangedEvent = new EventEnvelope<OrderStatusChangedEvent>(
-            Guid.NewGuid(),
-            "OrderStatusChanged",
-            DateTimeOffset.UtcNow,
-            1,
-            new OrderStatusChangedEvent(
+        var statusChangedEvent = EventEnvelope<OrderStatusChangedIntegrationEvent>.Create(
+            eventType: "OrderStatusChanged",
+            data: new OrderStatusChangedIntegrationEvent(
                 order.Id,
                 previousStatus.ToString(),
                 order.Status.ToString(),
@@ -55,23 +52,17 @@ public class ChangeOrderStatusUseCase
 
         if (order.Status == OrderStatus.Completed)
         {
-            var completedEvent = new EventEnvelope<OrderCompletedEvent>(
-                Guid.NewGuid(),
-                "OrderCompleted",
-                DateTimeOffset.UtcNow,
-                1,
-                new OrderCompletedEvent(order.Id, order.UpdatedAt ?? DateTimeOffset.UtcNow)
+            var completedEvent = EventEnvelope<OrderCompletedIntegrationEvent>.Create(
+                eventType: "OrderCompleted",
+                data: new OrderCompletedIntegrationEvent(order.Id, order.UpdatedAt ?? DateTimeOffset.UtcNow)
             );
             await _eventPublisher.PublishAsync(completedEvent, "order.completed", cancellationToken);
         }
         else if (order.Status == OrderStatus.Cancelled)
         {
-            var cancelledEvent = new EventEnvelope<OrderCancelledEvent>(
-                Guid.NewGuid(),
-                "OrderCancelled",
-                DateTimeOffset.UtcNow,
-                1,
-                new OrderCancelledEvent(order.Id, previousStatus.ToString(), order.UpdatedAt ?? DateTimeOffset.UtcNow)
+            var cancelledEvent = EventEnvelope<OrderCancelledIntegrationEvent>.Create(
+                eventType: "OrderCancelled",
+                data: new OrderCancelledIntegrationEvent(order.Id, previousStatus.ToString(), order.UpdatedAt ?? DateTimeOffset.UtcNow)
             );
             await _eventPublisher.PublishAsync(cancelledEvent, "order.cancelled", cancellationToken);
         }

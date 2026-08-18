@@ -43,12 +43,12 @@ public class CancelOrderUseCaseTests
         await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
 
         await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderStatusChangedEvent>>(e => e.Data.NewStatus == "Cancelled"),
+            Arg.Is<EventEnvelope<OrderStatusChangedIntegrationEvent>>(e => e.Data.NewStatus == "Cancelled"),
             Arg.Is<string>(rk => rk == "order.status.changed"),
             Arg.Any<CancellationToken>()
         );
         await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderCancelledEvent>>(e => e.Data.OrderId == order.Id && e.Data.PreviousStatus == "Pending"),
+            Arg.Is<EventEnvelope<OrderCancelledIntegrationEvent>>(e => e.Data.OrderId == order.Id && e.Data.PreviousStatus == "Pending"),
             Arg.Is<string>(rk => rk == "order.cancelled"),
             Arg.Any<CancellationToken>()
         );

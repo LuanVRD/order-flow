@@ -45,7 +45,7 @@ public class CreateOrderUseCaseTests
         await _repository.Received(1).AddAsync(Arg.Is<Order>(o => o.Id == result.Id), Arg.Any<CancellationToken>());
         await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
         await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderCreatedEvent>>(e => e.Data.OrderId == result.Id && e.EventType == "OrderCreated"),
+            Arg.Is<EventEnvelope<OrderCreatedIntegrationEvent>>(e => e.Data.OrderId == result.Id && e.EventType == "OrderCreated"),
             Arg.Is<string>(rk => rk == "order.created"),
             Arg.Any<CancellationToken>()
         );
@@ -70,6 +70,6 @@ public class CreateOrderUseCaseTests
         await _repository.DidNotReceive().AddAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
         await _repository.DidNotReceive().SaveChangesAsync(Arg.Any<CancellationToken>());
         await _eventPublisher.DidNotReceive().PublishAsync(
-            Arg.Any<EventEnvelope<OrderCreatedEvent>>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<EventEnvelope<OrderCreatedIntegrationEvent>>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 }

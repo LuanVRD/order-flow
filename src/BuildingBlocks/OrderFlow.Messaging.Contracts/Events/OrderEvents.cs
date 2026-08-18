@@ -1,6 +1,6 @@
 namespace OrderFlow.Messaging.Contracts.Events;
 
-public record OrderCreatedEvent(
+public record OrderCreatedIntegrationEvent(
     Guid OrderId,
     string CustomerName,
     string CustomerEmail,
@@ -9,20 +9,22 @@ public record OrderCreatedEvent(
     DateTimeOffset CreatedAt
 );
 
-public record OrderStatusChangedEvent(
+public record OrderStatusChangedIntegrationEvent(
     Guid OrderId,
     string PreviousStatus,
     string NewStatus,
     DateTimeOffset ChangedAt
 );
 
-public record OrderCompletedEvent(
+public record OrderCompletedIntegrationEvent(
     Guid OrderId,
     DateTimeOffset CompletedAt
 );
 
-public record OrderCancelledEvent(
+public record OrderCancelledIntegrationEvent(
     Guid OrderId,
     string PreviousStatus,
-    DateTimeOffset CancelledAt
+    DateTimeOffset CancelledAt,
+    string? Reason = null
 );
+

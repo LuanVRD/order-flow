@@ -42,7 +42,7 @@ public class ChangeOrderStatusUseCaseTests
         result.Status.Should().Be(OrderStatus.Processing);
         await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
         await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderStatusChangedEvent>>(e =>
+            Arg.Is<EventEnvelope<OrderStatusChangedIntegrationEvent>>(e =>
                 e.Data.OrderId == order.Id &&
                 e.Data.PreviousStatus == "Pending" &&
                 e.Data.NewStatus == "Processing"),
@@ -67,12 +67,12 @@ public class ChangeOrderStatusUseCaseTests
         result.Status.Should().Be(OrderStatus.Completed);
         await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
         await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderStatusChangedEvent>>(e => e.Data.NewStatus == "Completed"),
+            Arg.Is<EventEnvelope<OrderStatusChangedIntegrationEvent>>(e => e.Data.NewStatus == "Completed"),
             Arg.Is<string>(rk => rk == "order.status.changed"),
             Arg.Any<CancellationToken>()
         );
         await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderCompletedEvent>>(e => e.Data.OrderId == order.Id),
+            Arg.Is<EventEnvelope<OrderCompletedIntegrationEvent>>(e => e.Data.OrderId == order.Id),
             Arg.Is<string>(rk => rk == "order.completed"),
             Arg.Any<CancellationToken>()
         );
