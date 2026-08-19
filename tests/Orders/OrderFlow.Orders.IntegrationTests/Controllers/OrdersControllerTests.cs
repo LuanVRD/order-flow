@@ -41,6 +41,13 @@ public class CustomWebApplicationFactory : WebApplicationFactory<Program>
                 options.UseSqlite(_sqliteConnection);
             });
 
+            var publisherDescriptor = services.SingleOrDefault(d => d.ServiceType == typeof(OrderFlow.Orders.Application.Interfaces.IEventPublisher));
+            if (publisherDescriptor != null)
+            {
+                services.Remove(publisherDescriptor);
+            }
+            services.AddScoped<OrderFlow.Orders.Application.Interfaces.IEventPublisher, OrderFlow.Orders.Infrastructure.Messaging.LoggingEventPublisher>();
+
             var sp = services.BuildServiceProvider();
             using var scope = sp.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();

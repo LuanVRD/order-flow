@@ -94,10 +94,48 @@ Para garantir interoperabilidade e rastreabilidade entre microsserviços sem com
 - **`OrderCompletedIntegrationEvent`**: `(Guid OrderId, DateTimeOffset CompletedAt)`
 - **`OrderCancelledIntegrationEvent`**: `(Guid OrderId, string PreviousStatus, DateTimeOffset CancelledAt, string? Reason = null)`
 
+### 3.4 Topologia RabbitMQ no Orders Service
+
+O microsserviço de Orders publica eventos através da implementação `RabbitMqEventPublisher` (na camada `OrderFlow.Orders.Infrastructure`), atendendo à abstração `IEventPublisher` da camada Application.
+
+- **Exchange**: `orderflow.orders`
+  - **Tipo**: `topic`
+  - **Durabilidade**: `durable: true`, `autoDelete: false`
+- **Routing Keys**:
+  - `order.created`: Publicado imediatamente após a criação do pedido ser persistida com sucesso.
+  - `order.status.changed`: Publicado a cada transição de status do pedido.
+  - `order.completed`: Publicado quando o pedido atinge o estado final `Completed`.
+  - `order.cancelled`: Publicado quando o pedido é cancelado (`Cancelled`).
+- **Propriedades da Mensagem AMQP**:
+  - `ContentType`: `application/json`
+  - `ContentEncoding`: `utf-8`
+  - `DeliveryMode`: `Persistent` (2)
+  - `MessageId`: `EventEnvelope.EventId` (UUID)
+  - `CorrelationId`: `EventEnvelope.CorrelationId`
+  - `Type`: Nome do evento (`OrderCreated`, etc.)
+  - `Timestamp`: Unix Epoch do `OccurredAt`
+
 ---
 
-## 4. Padrões Distribuídos
+## 4. Padrões Distribuídos e Limitações Técnicas
 
-- **Idempotência**: O consumidor consulta e registra o `eventId` na tabela `ProcessedMessages` antes de processar, evitando duplicidade de efeitos colaterais em reentregas.
-- **Tratamento de Erros e DLQ**: Falhas transitórias no consumidor são retentadas em até N vezes. Persistindo a falha, a mensagem é encaminhada para `orderflow.notifications.dlq`.
+### 4.1 Limitação Técnica: Ausência de Transactional Outbox (Dual-Write Problem)
+
+> [!WARNING]
+> **Limitação Técnica Atual**: O microsserviço de Orders publica mensagens no RabbitMQ de forma síncrona diretamente nos casos de uso após a persistência no banco de dados (`SaveChangesAsync`).
+> 
+> **Impacto Arquitetural**:
+> 1. **Dual-Write Problem**: Como a escrita no PostgreSQL e a publicação no RabbitMQ não compartilham uma transação atômica distribuída (2PC / XA), há um ponto de falha onde o pedido pode ser gravado com sucesso no banco, mas a publicação no broker falhar (ex.: indisponibilidade transitória de rede, reinício do broker).
+> 2. **Semântica de Entrega**: Atualmente opera em regime de *melhor esforço* (*at-most-once* para publicação), o que pode acarretar em mensagens perdidas em caso de indisponibilidade no momento do disparo.
+> 
+> **Evolução Arquitetural Planejada**:
+> Em etapas subsequentes de maturidade da plataforma, essa limitação será mitigada com a implementação do **Transactional Outbox Pattern**:
+> - O caso de uso gravará o agregado `Order` e o registro do evento na tabela `OutboxMessages` dentro da **mesma transação relacional local** do PostgreSQL.
+> - Um processo em background (*BackgroundService* / Worker ou CDC com Debezium) fará o pooling/polling e a publicação garantida no RabbitMQ com confirmações (*publisher confirms*), assegurando semântica *at-least-once* ponta a ponta.
+
+### 4.2 Idempotência
+- O consumidor consulta e registra o `eventId` na tabela `ProcessedMessages` antes de processar, evitando duplicidade de efeitos colaterais em reentregas.
+
+### 4.3 Tratamento de Erros e DLQ
+- Falhas transitórias no consumidor são retentadas em até N vezes. Persistindo a falha, a mensagem é encaminhada para `orderflow.notifications.dlq`.
 

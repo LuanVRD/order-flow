@@ -13,7 +13,10 @@ public static class DependencyInjection
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<IOrderRepository, OrderRepository>();
-        services.AddScoped<IEventPublisher, LoggingEventPublisher>();
+
+        services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
+        services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
 
         if (services.Any(sd => sd.ServiceType == typeof(DbContextOptions<OrdersDbContext>)))
         {
