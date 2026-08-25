@@ -1,8 +1,12 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\OrderFlow.Notifications.Domain\OrderFlow.Notifications.Domain.csproj" />
     <ProjectReference Include="..\..\..\BuildingBlocks\OrderFlow.Messaging.Contracts\OrderFlow.Messaging.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.2" />
   </ItemGroup>
 
   <PropertyGroup>
