@@ -1,223 +1,335 @@
 # OrderFlow
 
-**OrderFlow** é um projeto de demonstração prática de arquitetura de microsserviços distribuídos construído no ecossistema .NET 9. Ele simula o processamento e fluxo de vida de pedidos com mensageria assíncrona, desacoplamento de serviços e aderência aos princípios de **Clean Architecture**.
+O **OrderFlow** é um ecossistema de microsserviços distribuídos orientado a eventos (EDA - Event-Driven Architecture), construído em **.NET 9 (C# 13)**. O projeto resolve o problema de processamento assíncrono e desacoplado do ciclo de vida de pedidos em sistemas distribuídos, demonstrando padrões arquiteturais de nível de produção como Clean Architecture, isolamento rigoroso de persistência (Database-per-Service), mensageria resiliente com RabbitMQ (Topic Exchange, Retry com backoff exponencial e Dead Letter Queue), processamento idempotente e observabilidade estruturada ponta a ponta com rastreabilidade distribuída.
 
 ---
 
-## 🏗️ Visão Geral da Arquitetura
+## 🛠️ Tecnologias e Ferramentas
 
-O sistema é dividido em dois microsserviços principais e uma biblioteca compartilhada de contratos:
-
-1. **Orders Service**: Responsável pelo gerenciamento do ciclo de vida de pedidos (Criação, Alteração de Status, Cancelamento).
-2. **Notifications Service**: Worker responsável por consumir eventos de domínio via RabbitMQ e registrar notificações persistidas.
-3. **BuildingBlocks (Messaging.Contracts)**: Contratos e envelopes de eventos distribuídos compartilhados entre microsserviços.
+| Categoria | Tecnologia | Finalidade no Projeto |
+| :--- | :--- | :--- |
+| **Runtime & Linguagem** | **.NET 9 (C# 13)** | Plataforma principal de desenvolvimento com recursos modernos de C# |
+| **Web API** | **ASP.NET Core** | Endpoints RESTful com injeção de dependência, Swagger e `ProblemDetails` |
+| **Worker Service** | **.NET BackgroundService** | Consumo contínuo de mensagens AMQP em processo isolado |
+| **Acesso a Dados** | **Entity Framework Core 9** | Mapeamento ORM, migrations automáticas e isolamento relacional |
+| **Banco de Dados** | **PostgreSQL 17** | Instâncias independentes por microsserviço (Database-per-Service) |
+| **Mensageria** | **RabbitMQ 3** | Broker de mensageria com Topic Exchange, DLX/DLQ e Consumer Acks |
+| **Logs & Rastreabilidade** | **Serilog** | Logs estruturados (`clef` JSON / texto) e propagação de `CorrelationId` |
+| **Testes Automatizados** | **xUnit, Moq, FluentAssertions** | Testes unitários de domínio e aplicação com cobertura de regras de negócio |
+| **Testes de Integração** | **WebApplicationFactory & Testcontainers** | Testes de integração HTTP e persistência contra instâncias reais de PostgreSQL |
+| **Containerização** | **Docker & Docker Compose** | Ambientes reproduzíveis, healthchecks e orquestração de múltiplos serviços |
 
 ---
 
-## 📁 Estrutura da Solução
+## 🏗️ Arquitetura do Sistema
 
-```text
-OrderFlow/
-├── src/
-│   ├── BuildingBlocks/
-│   │   └── OrderFlow.Messaging.Contracts/         # Contratos de eventos desacoplados
-│   └── Services/
-│       ├── Orders/                                # Microsserviço de Pedidos
-│       │   ├── OrderFlow.Orders.Domain/           # Entidades, Value Objects e Regras de Negócio
-│       │   ├── OrderFlow.Orders.Application/      # Casos de Uso, DTOs e Interfaces
-│       │   ├── OrderFlow.Orders.Infrastructure/   # EF Core, PostgreSQL e RabbitMQ Publisher
-│       │   └── OrderFlow.Orders.Api/              # REST API (ASP.NET Core)
-│       └── Notifications/                         # Microsserviço de Notificações
-│           ├── OrderFlow.Notifications.Domain/
-│           ├── OrderFlow.Notifications.Application/
-│           ├── OrderFlow.Notifications.Infrastructure/
-│           └── OrderFlow.Notifications.Worker/   # Worker Service consumidor do RabbitMQ
-└── tests/
-    ├── Orders/
-    │   ├── OrderFlow.Orders.Domain.Tests/        # Testes unitários do domínio Orders
-    │   ├── OrderFlow.Orders.Application.Tests/   # Testes unitários de aplicação
-    │   └── OrderFlow.Orders.IntegrationTests/    # Testes de integração
-    └── Notifications/
-        └── OrderFlow.Notifications.Tests/        # Testes de notificações
+```mermaid
+flowchart TD
+    subgraph ClientLayer["Camada do Cliente"]
+        Client["Cliente HTTP / Swagger"]
+    end
+
+    subgraph OrdersMicroservice["Microsserviço de Pedidos (Orders API)"]
+        API["Orders.Api (ASP.NET Core :5000)"]
+        OrdersUC["Casos de Uso (Application)"]
+        OrdersDomain["Domínio (Entidade Order / Domain Events)"]
+        OrdersRepo["Repositório EF Core (Infrastructure)"]
+        Publisher["RabbitMqEventPublisher (Infrastructure)"]
+    end
+
+    subgraph StorageLayer["Persistência Isolada"]
+        OrdersDB[("PostgreSQL Orders :5433\n(orderflow_orders)")]
+        NotifDB[("PostgreSQL Notifications :5434\n(orderflow_notifications)")]
+    end
+
+    subgraph MessageBroker["RabbitMQ Broker (:5672 / :15672)"]
+        Exchange["Exchange Topic\n(orderflow.orders)"]
+        Queue["Fila Principal\n(orderflow.notifications)"]
+        DLX["Dead Letter Exchange (Direct)\n(orderflow.notifications.dlx)"]
+        DLQ["Dead Letter Queue\n(orderflow.notifications.dlq)"]
+    end
+
+    subgraph NotificationsMicroservice["Microsserviço de Notificações (Worker)"]
+        Consumer["OrderEventsConsumer (Infrastructure)"]
+        NotifUC["ProcessOrderEventsUseCase (Application)"]
+        NotifRepo["Repositório & Idempotência (EF Core)"]
+    end
+
+    %% Fluxo de Criação e Persistência de Pedido
+    Client -->|"1. POST / PATCH / Cancel"| API
+    API -->|"2. Executa comando"| OrdersUC
+    OrdersUC -->|"3. Aplica regras & gera Domain Events"| OrdersDomain
+    OrdersUC -->|"4. Persiste estado"| OrdersRepo
+    OrdersRepo -->|"5. Gravação SQL"| OrdersDB
+
+    %% Publicação de Eventos de Integração
+    OrdersUC -->|"6. Publica Integration Event (EventEnvelope)"| Publisher
+    Publisher -->|"7. BasicPublish (Routing Key)"| Exchange
+    Exchange -->|"8. Roteamento via binding (*)"| Queue
+
+    %% Consumo e Processamento Resiliente
+    Queue -->|"9. BasicConsume (QoS / Ack)"| Consumer
+    Consumer -->|"10. Despacha evento válido"| NotifUC
+    NotifUC -->|"11. Valida idempotência & salva notificação"| NotifRepo
+    NotifRepo -->|"12. Gravação SQL"| NotifDB
+    Consumer -->|"13. BasicAck"| Queue
+
+    %% Fluxo de Falha / DLQ
+    Consumer -.->|"Poison Message / Retries Esgotados\nBasicNack(requeue: false)"| DLX
+    DLX -.->|"Roteamento DLQ"| DLQ
 ```
 
 ---
 
-## 🛠️ Tecnologias Utilizadas
+## 🏛️ Padrões e Conceitos Arquiteturais
 
-- **.NET 9 SDK** (C# 13)
-- **ASP.NET Core Web API**
-- **Docker & Docker Compose** (Containerização e orquestração local)
-- **Background Worker Service**
-- **Entity Framework Core**
-- **RabbitMQ** (Mensageria com Publisher/Subscriber e DLQ)
-- **PostgreSQL** (Persistência relacional isolada por microsserviço)
-- **xUnit** (Testes unitários e de integração)
+### 1. Clean Architecture por Microsserviço
+Cada serviço (`Orders` e `Notifications`) adota uma estrutura em camadas com regra de dependência estritamente unidirecional voltada para o centro:
+
+```text
+src/Services/Orders/
+├── OrderFlow.Orders.Domain/         # Entidades, Value Objects, Domain Events e Enums (Sem dependências externas)
+├── OrderFlow.Orders.Application/    # Casos de Uso, DTOs, Mapeamentos e Interfaces de Repositório/Publisher
+├── OrderFlow.Orders.Infrastructure/ # Implementações de IOrderRepository (EF Core), RabbitMQ Publisher e Migrations
+└── OrderFlow.Orders.Api/             # Controllers REST, Middlewares de CorrelationId e Exception Handling
+```
+
+* **Domain**: Não conhece frameworks, ORMs ou bancos de dados. Regras de transição de status (`Pending -> Processing -> Completed / Cancelled`) e validações de invariantes residem na própria entidade `Order`.
+* **Application**: Orquestra os fluxos de negócio através de Use Cases (`CreateOrderUseCase`, `ChangeOrderStatusUseCase`, etc.).
+* **Infrastructure**: Implementa contratos de persistência e comunicação externa (PostgreSQL, RabbitMQ).
+* **Presentation / Worker**: Ponto de entrada da aplicação (API HTTP ou Background Consumer).
+
+### 2. Isolamento de Persistência (Database-per-Service)
+* **Sem DbContext ou Entidades Compartilhadas**: Os microsserviços `Orders` e `Notifications` operam com bancos de dados PostgreSQL completamente separados em portas distintas (`5433` e `5434`).
+* **Baixo Acoplamento**: Alterações no schema de pedidos não quebram o serviço de notificações. A única superfície de contrato entre os microsserviços é a biblioteca compartilhada `OrderFlow.Messaging.Contracts`.
+* **Escala Independente**: Cada serviço pode ter suas instâncias de banco dimensionadas, migradas e tunadas conforme sua carga operacional.
+
+### 3. Domain Events vs Integration Events
+* **Domain Events** (ex: `OrderCreatedDomainEvent`):
+  * Ocorrem em memória, no mesmo processo, dentro do limite do microsserviço de `Orders`.
+  * Expressam uma mudança de estado que ocorreu no agregado `Order` para sincronização interna ou disparo de regras locais.
+* **Integration Events** (ex: `OrderCreatedIntegrationEvent`):
+  * Publicados no RabbitMQ envelopados no formato `EventEnvelope<T>`.
+  * Projetados para comunicação assíncrona entre diferentes *Bounded Contexts*.
+  * Carregam apenas os dados necessários para que consumidores externos reajam ao evento sem vazar detalhes internos do domínio de origem.
 
 ---
 
-## 🚀 Como Executar
+## 📬 Mensageria, Resiliência e Idempotência
+
+### Topologia RabbitMQ
+
+| Elemento | Nome / Tipo | Configuração | Detalhes |
+| :--- | :--- | :--- | :--- |
+| **Exchange Principal** | `orderflow.orders` (Topic) | `Durable: true` | Ponto de publicação dos eventos de integração da Orders API |
+| **Fila Principal** | `orderflow.notifications` | `Durable: true`, Prefetch: 10 | Vinculada à exchange via routing keys com DLX configurado |
+| **Dead Letter Exchange (DLX)** | `orderflow.notifications.dlx` (Direct) | `Durable: true` | Recebe mensagens rejeitadas definitivamente |
+| **Dead Letter Queue (DLQ)** | `orderflow.notifications.dlq` | `Durable: true` | Retém poison messages e falhas para análise técnica |
+
+### Routing Keys e Eventos de Integração
+
+* `order.created` $\rightarrow$ `OrderCreatedIntegrationEvent`
+* `order.status.changed` $\rightarrow$ `OrderStatusChangedIntegrationEvent`
+* `order.completed` $\rightarrow$ `OrderCompletedIntegrationEvent`
+* `order.cancelled` $\rightarrow$ `OrderCancelledIntegrationEvent`
+
+### Políticas de Resiliência no Consumidor
+
+1. **Retry com Backoff Exponencial**:
+   Falhas transitórias (indisponibilidade temporária de banco, concorrência ou timeout de rede) acionam até **3 tentativas de processamento** com atraso incremental ($500\text{ms} \times 2^{\text{tentativa}-1}$).
+2. **Tratamento Imediato de Poison Messages**:
+   Mensagens com payload corrompido (JSON inválido, campos obrigatórios ausentes, `EventType` não suportado) são rejeitadas imediatamente com `BasicNack(requeue: false)`, indo direto para a DLQ sem desperdiçar ciclos de retry.
+3. **Processamento Idempotente**:
+   O worker consulta a tabela `ProcessedMessages` no banco de notificações. Se o `EventId` recebido no envelope já tiver sido processado com sucesso, a mensagem recebe `BasicAck` imediatamente e a notificação não é duplicada.
+4. **Confirmação Estrita (Manual Acknowledgment)**:
+   Nenhuma mensagem é confirmada automaticamente. O `BasicAck` só é enviado após a persistência segura no banco de dados.
+
+---
+
+## 🚀 Como Executar o Projeto
 
 ### Pré-requisitos
-- **Docker** e **Docker Compose** instalados (ou .NET 9 SDK para execução local direta).
+* **Docker** (versão 24+) e **Docker Compose** instalados; ou
+* **.NET 9 SDK** (caso queira rodar os testes ou compilar localmente).
 
 ---
 
-### 🐳 Execução Completa com Docker Compose (Recomendado)
+### 1. Execução Completa via Docker Compose
 
-Para subir todo o ecossistema (Orders API, Notifications Worker, 2 bancos PostgreSQL isolados e RabbitMQ Management) de forma reproduzível:
-
-1. **Configurar variáveis de ambiente**:
+1. **Clonar o repositório**:
    ```bash
-   cp .env.example .env
+   git clone https://github.com/LuanVRD/order-flow.git
+   cd order-flow
    ```
 
-2. **Iniciar todos os serviços com build**:
+2. **Configurar o arquivo de ambiente**:
+   ```bash
+   # Linux / macOS:
+   cp .env.example .env
+
+   # Windows (PowerShell):
+   Copy-Item .env.example .env
+   ```
+
+3. **Iniciar todos os serviços em segundo plano**:
    ```bash
    docker compose up --build -d
    ```
 
-3. **Portas e Serviços Disponíveis**:
-   - 🌐 **Orders API (Swagger / OpenAPI)**: [http://localhost:5000/swagger](http://localhost:5000/swagger)
-   - 🐰 **RabbitMQ Management UI**: [http://localhost:15672](http://localhost:15672) (Credenciais: `guest` / `guest`)
-   - 🐘 **Orders Database (PostgreSQL)**: `localhost:5433` (Database: `orderflow_orders`, User: `postgres`, Password: `postgres`)
-   - 🐘 **Notifications Database (PostgreSQL)**: `localhost:5434` (Database: `orderflow_notifications`, User: `postgres`, Password: `postgres`)
+4. **Verificar o status dos containers**:
+   ```bash
+   docker compose ps
+   ```
 
-4. **Acompanhar os logs estruturados**:
+5. **Acompanhar logs estruturados em tempo real**:
    ```bash
    docker compose logs -f
    ```
 
-5. **Parar e remover os containers e volumes**:
+6. **Parar a infraestrutura**:
    ```bash
    docker compose down -v
    ```
 
 ---
 
-### 💻 Execução Local Direta (.NET CLI)
+### 2. Endereços e Portas de Acesso
 
-Caso deseje compilar e rodar localmente sem containers:
-
-```bash
-# Restaurar dependências e compilar a solução
-dotnet build OrderFlow.sln
-
-# Executar todos os testes automatizados
-dotnet test OrderFlow.sln
-```
+| Serviço | URL / Endereço | Credenciais / Notas |
+| :--- | :--- | :--- |
+| 🌐 **Orders API (Swagger UI)** | [http://localhost:5000/swagger](http://localhost:5000/swagger) | Documentação interativa da API |
+| 🐰 **RabbitMQ Management** | [http://localhost:15672](http://localhost:15672) | Usuário: `guest` \| Senha: `guest` |
+| 🐘 **Orders Database (PostgreSQL)** | `localhost:5433` | Database: `orderflow_orders` \| User/Pass: `postgres`/`postgres` |
+| 🐘 **Notifications DB (PostgreSQL)** | `localhost:5434` | Database: `orderflow_notifications` \| User/Pass: `postgres`/`postgres` |
 
 ---
 
-## 📬 Mensageria, Resiliência e Dead Letter Queue (DLQ)
+## 📡 Endpoints da Orders API
 
-O serviço de notificações (`OrderFlow.Notifications.Worker`) implementa tratamento explícito de falhas com proteção contra loops infinitos e perda de mensagens:
-
-- **Política de Retry**: Até 3 tentativas com backoff exponencial para falhas transitórias (banco indisponível, timeouts de rede, concorrência).
-- **Tratamento de Poison Messages**: Mensagens definitivamente inválidas (JSON corrompido, envelope sem payload, tipo de evento desconhecido) são rejeitadas imediatamente (`requeue: false`), sendo enviadas diretamente para a DLQ sem desperdiçar retries.
-- **Dead Letter Topology**:
-  - **Exchange DLX**: `orderflow.notifications.dlx` (Direct)
-  - **Fila DLQ**: `orderflow.notifications.dlq` (Durable)
-  - **Fila Principal**: `orderflow.notifications` com `x-dead-letter-exchange: orderflow.notifications.dlx` e `x-dead-letter-routing-key: orderflow.notifications.dlq`.
-- **Confirmação Estrita**: Mensagens só recebem `BasicAck` após processamento com sucesso (ou confirmação de duplicata idempotente). Em falhas terminais, o `BasicNack(requeue: false)` garante o roteamento automático para a DLQ pelo RabbitMQ.
-
-### 🔍 Como Visualizar e Inspecionar a DLQ no RabbitMQ Management
-
-1. **Acesse o painel web do RabbitMQ**:
-   Abra no navegador: `http://localhost:15672` (Usuário padrão: `guest` / Senha: `guest`).
-
-2. **Navegue até as Filas**:
-   Clique no menu **Queues and Streams** no topo do painel.
-
-3. **Localize a fila da DLQ**:
-   Na lista de filas, clique em `orderflow.notifications.dlq`.
-
-4. **Inspecione as mensagens retidas**:
-   - Role até a seção **Get messages**.
-   - Defina **Messages**: `1` (ou a quantidade desejada).
-   - Defina **Requeue**: `Yes` (para apenas inspecionar sem remover) ou `No` (para consumir e remover da DLQ).
-   - Clique no botão **Get Message(s)**.
-
-5. **O que analisar na mensagem na DLQ**:
-   - **Payload**: O conteúdo JSON original do evento com os dados intactos (`EventId`, `Data`, `CorrelationId`).
-   - **Headers (`x-death`)**: Array contendo metadados injetados nativamente pelo RabbitMQ:
-     - `reason`: Motivo da rejeição (`rejected`).
-     - `queue`: Fila de origem onde ocorreu a falha (`orderflow.notifications`).
-     - `count`: Quantidade de vezes que a mensagem sofreu dead-lettering.
-     - `time`: Timestamp exato da ocorrência do erro.
-   - **Properties**: `correlation_id`, `message_id`, `type` e `content_type`.
-
----
-
-## 📊 Observabilidade e Logs Estruturados (Serilog)
-
-O OrderFlow utiliza **Serilog** com suporte nativo a rastreabilidade ponta a ponta via `CorrelationId` e enriquecimento de propriedades em ambos os microsserviços:
-
-- **Propriedades Estruturadas**: `ServiceName`, `CorrelationId`, `OrderId`, `EventId`, `EventType`, `DeliveryTag`, `StatusCode`, etc.
-- **Saída em Desenvolvimento**: Formato textual com destaque e contexto:
-  ```text
-  [10:15:30 INF] [Orders.Api] [9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d] Order f47ac10b-58cc-4372-a567-0e02b2c3d479 successfully created with status 'Pending'.
+### 1. Criar um Novo Pedido
+* **Rota**: `POST /api/orders`
+* **Exemplo cURL**:
+  ```bash
+  curl -X POST http://localhost:5000/api/orders \
+    -H "Content-Type: application/json" \
+    -H "X-Correlation-ID: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" \
+    -d '{
+      "customerName": "Luan Silva",
+      "customerEmail": "luan@example.com",
+      "totalAmount": 199.90
+    }'
   ```
-- **Saída para Containers (JSON)**: Ativada em produção ou configurando `"Serilog:UseJsonConsole": true`, emitindo formato compacto JSON (`clef`) pronto para ingestão em ElasticSearch, Grafana Loki, Fluentbit ou AWS CloudWatch.
-- **Segurança de Dados**: Credenciais de banco/RabbitMQ e dados sensíveis de usuários são mascarados/omitidos.
+* **Resposta (`201 Created`)**:
+  ```json
+  {
+    "id": "a3f5f8b9-1234-4567-89ab-cdef01234567",
+    "customerName": "Luan Silva",
+    "customerEmail": "luan@example.com",
+    "totalAmount": 199.90,
+    "status": "Pending",
+    "createdAt": "2026-09-08T16:45:00.000Z",
+    "updatedAt": null
+  }
+  ```
+
+### 2. Listar Todos os Pedidos
+* **Rota**: `GET /api/orders`
+* **Exemplo cURL**:
+  ```bash
+  curl -X GET http://localhost:5000/api/orders
+  ```
+
+### 3. Consultar Pedido por ID
+* **Rota**: `GET /api/orders/{id}`
+* **Exemplo cURL**:
+  ```bash
+  curl -X GET http://localhost:5000/api/orders/a3f5f8b9-1234-4567-89ab-cdef01234567
+  ```
+
+### 4. Atualizar Status do Pedido
+* **Rota**: `PATCH /api/orders/{id}/status`
+* **Exemplo cURL**:
+  ```bash
+  curl -X PATCH http://localhost:5000/api/orders/a3f5f8b9-1234-4567-89ab-cdef01234567/status \
+    -H "Content-Type: application/json" \
+    -d '{
+      "newStatus": "Processing"
+    }'
+  ```
+
+### 5. Cancelar Pedido
+* **Rota**: `POST /api/orders/{id}/cancel`
+* **Exemplo cURL**:
+  ```bash
+  curl -X POST http://localhost:5000/api/orders/a3f5f8b9-1234-4567-89ab-cdef01234567/cancel
+  ```
 
 ---
 
 ## 🧪 Estratégia e Execução de Testes
 
-A suíte de testes do OrderFlow foi desenhada para garantir alta fidelidade aos fluxos de negócio críticos e contratos de integração sem buscar coberturas artificiais de 100%:
+A suíte de testes cobre as principais camadas do sistema com pirâmide balanceada:
 
-### 🏛️ Estrutura da Pirâmide de Testes
+1. **Testes de Domínio (`OrderFlow.Orders.Domain.Tests`)**:
+   Validação isolada das regras de negócio e transições de status da entidade `Order` (`Pending` $\rightarrow$ `Processing` $\rightarrow$ `Completed` / `Cancelled`), impedindo transições inválidas (ex: cancelar pedido concluído) sem dependências externas.
+2. **Testes de Aplicação (`OrderFlow.Orders.Application.Tests` e `OrderFlow.Notifications.Tests`)**:
+   Validação dos Casos de Uso com *Mocks*, publicação de envelopes com `CorrelationId` e testes de idempotência contra duplicatas de mensagens.
+3. **Testes de Integração HTTP (`OrderFlow.Orders.IntegrationTests`)**:
+   Validação de controllers e middlewares com `WebApplicationFactory` simulando requisições REST completas com validação de `ProblemDetails` e headers.
+4. **Testes de Persistência com PostgreSQL Real (`Testcontainers`)**:
+   Testes de repositório executados contra instâncias reais de PostgreSQL em containers efêmeros via **Testcontainers.PostgreSql**, garantindo validação de schemas, tipos nativos e constraints.
 
-1. **Testes de Domínio (Unitários)**:
-   - Validação de regras e invariantes de negócio na entidade `Order` (`OrderFlow.Orders.Domain.Tests`).
-   - Cobertura exaustiva de transições válidas e inválidas da máquina de estados (`Pending -> Processing -> Completed / Cancelled`).
-   - Geração correta e isolada de eventos de domínio (`OrderCreatedDomainEvent`, `OrderStatusChangedDomainEvent`, etc.).
-   - Sanitização de entradas e validação de invariantes sem dependência de I/O externo.
+### Comandos de Teste
 
-2. **Testes de Aplicação (Unitários com Mocks)**:
-   - Cobertura dos casos de uso de criação, consulta por ID, listagem, alteração de status e cancelamento (`OrderFlow.Orders.Application.Tests`).
-   - Validação de publicação de contratos de mensageria envelopados (`EventEnvelope<T>`) com propagação correta de `CorrelationId`.
-   - Idempotência nos casos de uso de notificações (`OrderFlow.Notifications.Tests.Application`), validando descarte seguro de mensagens duplicadas sem reprocessamento ou efeitos colaterais.
-
-3. **Testes de Integração HTTP (WebApplicationFactory)**:
-   - Teste de comportamento dos endpoints REST da Orders API (`OrderFlow.Orders.IntegrationTests.Controllers`).
-   - Respostas esperadas e mapeamentos de status: `201 Created` (com header `Location`), `400 Bad Request` (com `ProblemDetails` e mensagens de validação detalhadas) e `404 Not Found`.
-   - Propagação e injeção do header HTTP `X-Correlation-ID`.
-
-4. **Testes de Persistência Real (PostgreSQL & Testcontainers)**:
-   - Testes de integração de banco de dados executando contra instâncias reais e efêmeras de PostgreSQL via **Testcontainers** (`Testcontainers.PostgreSql`).
-   - Execução das migrações reais do Entity Framework Core (`Database.MigrateAsync()`).
-   - Validação de tipos nativos do PostgreSQL (`numeric(18,2)`, `varchar`, `timestamp with time zone`) e restrições de chave primária/unicidade para tabelas como `ProcessedMessages` e `Notifications`.
-
----
-
-### ▶️ Como Executar os Testes
-
-#### 1. Executar Toda a Suíte (Unitários + Integração):
 ```bash
+# Executar toda a suíte de testes da solução:
 dotnet test
-```
 
-#### 2. Executar Projetos Específicos:
-```bash
-# Testes unitários de Domínio (Orders)
+# Executar apenas testes de domínio de Orders:
 dotnet test tests/Orders/OrderFlow.Orders.Domain.Tests/
 
-# Testes unitários de Aplicação (Orders)
+# Executar apenas testes de aplicação de Orders:
 dotnet test tests/Orders/OrderFlow.Orders.Application.Tests/
 
-# Testes de Notificações (Aplicação, Domínio, Idempotência e Persistência)
+# Executar testes do serviço de Notificações:
 dotnet test tests/Notifications/OrderFlow.Notifications.Tests/
 
-# Testes de Integração de Orders (HTTP Controllers + Repositórios PostgreSQL)
+# Executar testes de integração (Controllers + PostgreSQL):
 dotnet test tests/Orders/OrderFlow.Orders.IntegrationTests/
 ```
 
 ---
 
-## 📖 Documentação Detalhada
+## ⚖️ Decisões Arquiteturais e Trade-offs
 
-Para detalhes aprofundados sobre decisões de design, direções de dependência entre camadas, resiliência (Retry e DLQ), idempotência e exemplos completos de logs JSON, consulte o arquivo [ARCHITECTURE.md](file:///e:/projetos/order-flow/ARCHITECTURE.md).
+### 1. Topic Exchange vs Direct / Fanout
+* **Decisão**: Utilizou-se `Topic Exchange` (`orderflow.orders`) com routing keys hierárquicas (`order.created`, `order.status.changed`, etc.).
+* **Justificativa**: Permite que novos microsserviços (ex: Faturamento, Logística, Analytics) assinem apenas tópicos específicos usando padrões curinga (ex: `order.*` ou `order.cancelled`) sem alterar a Orders API.
 
+### 2. Database-per-Service vs Shared Database
+* **Decisão**: Bancos de dados PostgreSQL físicos e lógicos isolados por serviço.
+* **Justificativa**: Garante desacoplamento operacional e autonomia de evolução de schema.
+* **Trade-off**: Impossibilita *JOINs* relacionais diretos e transações ACID distribuídas (2PC), exigindo consistência eventual e propagação de dados via eventos.
 
+### 3. Publicação Direta vs Transactional Outbox (Limitação Atual do MVP)
+* **Decisão no MVP**: A `Orders API` realiza o commit da transação no PostgreSQL e, em seguida, efetua o `BasicPublish` no RabbitMQ via conexão persistente.
+* **Trade-off e Limitação**: Em caso de falha de rede ou queda do processo exatamente entre o commit no banco e o envio ao broker, o evento pode ser perdido (inconsistência eventual).
+* **Solução para Produção**: Implementação do **Transactional Outbox Pattern** (gravação do evento em uma tabela `Outbox` na mesma transação atômica do pedido, com posterior despacho garantido por Worker ou Debezium CDC).
+
+---
+
+## 🔮 Próximas Evoluções (Roadmap pós-MVP)
+
+As seguintes melhorias representam evoluções naturais para um ambiente de produção em larga escala:
+
+- [ ] **Transactional Outbox Pattern**: Garantir entrega atômica *at-least-once* de eventos entre o banco relacional e o RabbitMQ.
+- [ ] **Distributed Caching com Redis**: Cache de leitura para consultas de pedidos (`GET /api/orders/{id}`) com invalidação por eventos.
+- [ ] **OpenTelemetry & Tracing Distribuído**: Exportação nativa de traces e métricas (OTLP) para Jaeger, Tempo e Grafana.
+- [ ] **Pipeline CI/CD**: Automação de compilação, análise estática de código (SonarQube) e execução de testes no GitHub Actions.
+- [ ] **Cloud Deployment**: Implantação do ecossistema no Azure utilizando **Azure Container Apps**, **Azure Database for PostgreSQL Flexible Server** e **Azure Service Bus**.
+
+---
+
+## 📄 Licença
+
+Este projeto está sob a licença [MIT](LICENSE).
