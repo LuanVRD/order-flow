@@ -136,6 +136,24 @@ O microsserviço de Orders publica eventos através da implementação `RabbitMq
 ### 4.2 Idempotência
 - O consumidor consulta e registra o `eventId` na tabela `ProcessedMessages` antes de processar, evitando duplicidade de efeitos colaterais em reentregas.
 
-### 4.3 Tratamento de Erros e DLQ
-- Falhas transitórias no consumidor são retentadas em até N vezes. Persistindo a falha, a mensagem é encaminhada para `orderflow.notifications.dlq`.
+### 4.3 Tratamento de Erros, Política de Retry e Dead Letter Queue (DLQ)
+
+O consumidor `OrderEventsConsumer` adota uma política de resiliência ativa para garantir que falhas não causem travamento da fila nem perda de mensagens:
+
+1. **Classificação de Falhas**:
+   - **Falhas Definitivamente Inválidas (Poison Messages)**: Mensagens com JSON malformado (`JsonException`), envelope com payload nulo ou tipos de evento desconhecidos são rejeitadas imediatamente (`BasicNackAsync(multiple: false, requeue: false)`). O RabbitMQ encaminha a mensagem diretamente para a DLQ sem desperdício de tentativas de retry.
+   - **Falhas Transitórias**: Exceções durante o processamento do caso de uso (ex.: indisponibilidade temporária do banco, concorrência, timeouts) acionam a política de retry.
+
+2. **Política de Retry**:
+   - **Tentativas Máximas**: 3 tentativas (`MaxRetryAttempts = 3`).
+   - **Backoff Exponencial**: Intervalo progressivo entre tentativas (`InitialRetryDelayMs = 500ms`, `attempt 2 = 1000ms`, `attempt 3 = 2000ms`).
+   - **Logs Estruturados**: Cada tentativa emite log contendo `Attempt {Current}/{Max}`, `EventType`, `EventId` e `CorrelationId`.
+
+3. **Exaustão e Dead-Lettering**:
+   - Se todas as 3 tentativas falharem, o consumidor emite log de erro crítico informando a exaustão e executa `BasicNackAsync(multiple: false, requeue: false)`.
+   - O RabbitMQ captura a rejeição sem requeue através da configuração nativa de fila (`x-dead-letter-exchange: orderflow.notifications.dlx` e `x-dead-letter-routing-key: orderflow.notifications.dlq`) e move a mensagem para a fila `orderflow.notifications.dlq`, preservando todo o payload e injetando o array de headers `x-death`.
+
+4. **Garantia de Confirmação (At-Least-Once Delivery)**:
+   - A mensagem **nunca** é confirmada (`BasicAckAsync`) antes de ser processada e persistida com sucesso (ou deduplicada via idempotência).
+   - Não há possibilidade de perda silenciosa nem de loop infinito de reprocessamento.
 

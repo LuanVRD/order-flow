@@ -57,6 +57,12 @@ public class RabbitMqConnectionTests
         options.Durable.Should().BeTrue();
         options.AutoDelete.Should().BeFalse();
         options.PrefetchCount.Should().Be(10);
+        options.DeadLetterExchangeName.Should().Be("orderflow.notifications.dlx");
+        options.DeadLetterExchangeType.Should().Be("direct");
+        options.DeadLetterQueueName.Should().Be("orderflow.notifications.dlq");
+        options.DeadLetterRoutingKey.Should().Be("orderflow.notifications.dlq");
+        options.MaxRetryAttempts.Should().Be(3);
+        options.InitialRetryDelayMs.Should().Be(500);
         options.RoutingKeys.Should().Contain(
             "order.created",
             "order.status.changed",

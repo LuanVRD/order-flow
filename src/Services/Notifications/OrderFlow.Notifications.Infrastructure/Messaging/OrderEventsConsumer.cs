@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OrderFlow.Messaging.Contracts.Events;
 using OrderFlow.Notifications.Application.UseCases;
+using OrderFlow.Notifications.Domain.Entities;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -55,9 +56,10 @@ public class OrderEventsConsumer : IOrderEventsConsumer
         };
 
         _logger.LogInformation(
-            "Starting consumption on queue '{QueueName}' with PrefetchCount {PrefetchCount}...",
+            "Starting consumption on queue '{QueueName}' with PrefetchCount {PrefetchCount} and DLQ '{DlQueueName}'...",
             _options.QueueName,
-            _options.PrefetchCount);
+            _options.PrefetchCount,
+            _options.DeadLetterQueueName);
 
         await channel.BasicConsumeAsync(
             queue: _options.QueueName,
@@ -95,220 +97,221 @@ public class OrderEventsConsumer : IOrderEventsConsumer
         CancellationToken cancellationToken = default)
     {
         string? eventType = properties.Type;
+        string? correlationId = properties.CorrelationId;
+        string? messageId = properties.MessageId;
+        Guid? eventId = Guid.TryParse(messageId, out var parsedEventId) ? parsedEventId : null;
+        Guid? orderId = null;
 
+        // 1. Validate & Parse JSON Payload Metadata
         try
         {
-            if (string.IsNullOrWhiteSpace(eventType))
-            {
-                using var jsonDoc = JsonDocument.Parse(body);
-                if (jsonDoc.RootElement.TryGetProperty("eventType", out var eventTypeProp) ||
-                    jsonDoc.RootElement.TryGetProperty("EventType", out eventTypeProp))
-                {
-                    eventType = eventTypeProp.GetString();
-                }
-            }
+            using var jsonDoc = JsonDocument.Parse(body);
+            var root = jsonDoc.RootElement;
 
             if (string.IsNullOrWhiteSpace(eventType))
             {
-                _logger.LogWarning("Message received with unidentifiable EventType. Acknowledging to avoid blocking queue.");
-                await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                return;
+                if (root.TryGetProperty("eventType", out var etProp) || root.TryGetProperty("EventType", out etProp))
+                {
+                    eventType = etProp.GetString();
+                }
             }
 
-            using var scope = _serviceScopeFactory.CreateScope();
-
-            switch (eventType)
+            if (!eventId.HasValue)
             {
-                case "OrderCreated":
+                if ((root.TryGetProperty("eventId", out var eidProp) || root.TryGetProperty("EventId", out eidProp)) &&
+                    eidProp.TryGetGuid(out var parsedEid))
                 {
-                    var envelope = JsonSerializer.Deserialize<EventEnvelope<OrderCreatedIntegrationEvent>>(body.Span, SerializerOptions);
-                    if (envelope?.Data == null)
-                    {
-                        _logger.LogWarning("Malformed payload for event type 'OrderCreated'. Acknowledging to avoid poisoning queue.");
-                        await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                        return;
-                    }
-
-                    _logger.LogInformation(
-                        "Processing integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}].",
-                        envelope.EventType,
-                        envelope.EventId,
-                        envelope.Data.OrderId,
-                        envelope.CorrelationId ?? "N/A");
-
-                    var useCase = scope.ServiceProvider.GetRequiredService<ProcessOrderCreatedEventUseCase>();
-                    var result = await useCase.ExecuteAsync(envelope, cancellationToken);
-
-                    if (result == null)
-                    {
-                        _logger.LogInformation(
-                            "Integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}] was already processed. Acknowledging message without duplicate notification.",
-                            envelope.EventType,
-                            envelope.EventId,
-                            envelope.Data.OrderId);
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "Notification '{NotificationId}' created for order '{OrderId}' [EventId: {EventId}, CorrelationId: {CorrelationId}].",
-                            result.Id,
-                            envelope.Data.OrderId,
-                            envelope.EventId,
-                            envelope.CorrelationId ?? "N/A");
-                    }
-
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                    break;
+                    eventId = parsedEid;
                 }
+            }
 
-                case "OrderStatusChanged":
+            if (string.IsNullOrWhiteSpace(correlationId))
+            {
+                if (root.TryGetProperty("correlationId", out var corrProp) || root.TryGetProperty("CorrelationId", out corrProp))
                 {
-                    var envelope = JsonSerializer.Deserialize<EventEnvelope<OrderStatusChangedIntegrationEvent>>(body.Span, SerializerOptions);
-                    if (envelope?.Data == null)
-                    {
-                        _logger.LogWarning("Malformed payload for event type 'OrderStatusChanged'. Acknowledging to avoid poisoning queue.");
-                        await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                        return;
-                    }
-
-                    _logger.LogInformation(
-                        "Processing integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}].",
-                        envelope.EventType,
-                        envelope.EventId,
-                        envelope.Data.OrderId,
-                        envelope.CorrelationId ?? "N/A");
-
-                    var useCase = scope.ServiceProvider.GetRequiredService<ProcessOrderStatusChangedEventUseCase>();
-                    var result = await useCase.ExecuteAsync(envelope, cancellationToken);
-
-                    if (result == null)
-                    {
-                        _logger.LogInformation(
-                            "Integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}] was already processed. Acknowledging message without duplicate notification.",
-                            envelope.EventType,
-                            envelope.EventId,
-                            envelope.Data.OrderId);
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "Notification '{NotificationId}' created for order '{OrderId}' [EventId: {EventId}, CorrelationId: {CorrelationId}].",
-                            result.Id,
-                            envelope.Data.OrderId,
-                            envelope.EventId,
-                            envelope.CorrelationId ?? "N/A");
-                    }
-
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                    break;
+                    correlationId = corrProp.GetString();
                 }
+            }
 
-                case "OrderCompleted":
+            if (root.TryGetProperty("data", out var dataProp) || root.TryGetProperty("Data", out dataProp))
+            {
+                if (dataProp.ValueKind == JsonValueKind.Object &&
+                    (dataProp.TryGetProperty("orderId", out var oidProp) || dataProp.TryGetProperty("OrderId", out oidProp)) &&
+                    oidProp.TryGetGuid(out var parsedOid))
                 {
-                    var envelope = JsonSerializer.Deserialize<EventEnvelope<OrderCompletedIntegrationEvent>>(body.Span, SerializerOptions);
-                    if (envelope?.Data == null)
-                    {
-                        _logger.LogWarning("Malformed payload for event type 'OrderCompleted'. Acknowledging to avoid poisoning queue.");
-                        await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                        return;
-                    }
-
-                    _logger.LogInformation(
-                        "Processing integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}].",
-                        envelope.EventType,
-                        envelope.EventId,
-                        envelope.Data.OrderId,
-                        envelope.CorrelationId ?? "N/A");
-
-                    var useCase = scope.ServiceProvider.GetRequiredService<ProcessOrderCompletedEventUseCase>();
-                    var result = await useCase.ExecuteAsync(envelope, cancellationToken);
-
-                    if (result == null)
-                    {
-                        _logger.LogInformation(
-                            "Integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}] was already processed. Acknowledging message without duplicate notification.",
-                            envelope.EventType,
-                            envelope.EventId,
-                            envelope.Data.OrderId);
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "Notification '{NotificationId}' created for order '{OrderId}' [EventId: {EventId}, CorrelationId: {CorrelationId}].",
-                            result.Id,
-                            envelope.Data.OrderId,
-                            envelope.EventId,
-                            envelope.CorrelationId ?? "N/A");
-                    }
-
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                    break;
+                    orderId = parsedOid;
                 }
-
-                case "OrderCancelled":
-                {
-                    var envelope = JsonSerializer.Deserialize<EventEnvelope<OrderCancelledIntegrationEvent>>(body.Span, SerializerOptions);
-                    if (envelope?.Data == null)
-                    {
-                        _logger.LogWarning("Malformed payload for event type 'OrderCancelled'. Acknowledging to avoid poisoning queue.");
-                        await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                        return;
-                    }
-
-                    _logger.LogInformation(
-                        "Processing integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}].",
-                        envelope.EventType,
-                        envelope.EventId,
-                        envelope.Data.OrderId,
-                        envelope.CorrelationId ?? "N/A");
-
-                    var useCase = scope.ServiceProvider.GetRequiredService<ProcessOrderCancelledEventUseCase>();
-                    var result = await useCase.ExecuteAsync(envelope, cancellationToken);
-
-                    if (result == null)
-                    {
-                        _logger.LogInformation(
-                            "Integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}] was already processed. Acknowledging message without duplicate notification.",
-                            envelope.EventType,
-                            envelope.EventId,
-                            envelope.Data.OrderId);
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "Notification '{NotificationId}' created for order '{OrderId}' [EventId: {EventId}, CorrelationId: {CorrelationId}].",
-                            result.Id,
-                            envelope.Data.OrderId,
-                            envelope.EventId,
-                            envelope.CorrelationId ?? "N/A");
-                    }
-
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                    break;
-                }
-
-                default:
-                    _logger.LogWarning(
-                        "Unsupported event type '{EventType}'. Acknowledging to discard.",
-                        eventType);
-                    await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-                    break;
             }
         }
         catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "Failed to deserialize JSON message payload for delivery tag {DeliveryTag}. Acknowledging to discard invalid message.", deliveryTag);
-            await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
-        }
-        catch (Exception ex)
-        {
             _logger.LogError(
                 ex,
-                "Unhandled error occurred while processing message [DeliveryTag: {DeliveryTag}, EventType: {EventType}]. Requeuing message.",
+                "Failed to parse JSON payload [DeliveryTag: {DeliveryTag}, EventId: {EventId}, CorrelationId: {CorrelationId}]. Forwarding directly to DLQ '{DlQueueName}' without retries.",
                 deliveryTag,
-                eventType ?? "Unknown");
+                eventId?.ToString() ?? "N/A",
+                correlationId ?? "N/A",
+                _options.DeadLetterQueueName);
 
-            await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: true, cancellationToken);
+            await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, cancellationToken);
+            return;
         }
+
+        var resolvedEventId = eventId?.ToString() ?? "N/A";
+        var resolvedCorrelationId = correlationId ?? "N/A";
+        var resolvedOrderId = orderId.HasValue ? orderId.Value.ToString() : "N/A";
+
+        // 2. Reject unidentifiable or unsupported events immediately to DLQ
+        if (string.IsNullOrWhiteSpace(eventType) || !IsSupportedEventType(eventType))
+        {
+            _logger.LogWarning(
+                "Unsupported or unidentifiable EventType '{EventType}' [DeliveryTag: {DeliveryTag}, EventId: {EventId}, CorrelationId: {CorrelationId}]. Forwarding directly to DLQ '{DlQueueName}' without retries.",
+                eventType ?? "Unknown",
+                deliveryTag,
+                resolvedEventId,
+                resolvedCorrelationId,
+                _options.DeadLetterQueueName);
+
+            await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, cancellationToken);
+            return;
+        }
+
+        // 3. Reject malformed envelope data immediately to DLQ
+        if (!ValidateEnvelopeData(eventType, body))
+        {
+            _logger.LogWarning(
+                "Malformed payload (null Data) for event type '{EventType}' [DeliveryTag: {DeliveryTag}, EventId: {EventId}, CorrelationId: {CorrelationId}]. Forwarding directly to DLQ '{DlQueueName}' without retries.",
+                eventType,
+                deliveryTag,
+                resolvedEventId,
+                resolvedCorrelationId,
+                _options.DeadLetterQueueName);
+
+            await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, cancellationToken);
+            return;
+        }
+
+        // 4. Retry loop with max attempts for transient failures
+        int maxAttempts = Math.Max(1, _options.MaxRetryAttempts);
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                _logger.LogInformation(
+                    "Processing integration event '{EventType}' [Attempt {Attempt}/{MaxAttempts}] [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}].",
+                    eventType,
+                    attempt,
+                    maxAttempts,
+                    resolvedEventId,
+                    resolvedOrderId,
+                    resolvedCorrelationId);
+
+                using var scope = _serviceScopeFactory.CreateScope();
+                var notification = await DispatchEventAsync(eventType, body, scope.ServiceProvider, cancellationToken);
+
+                if (notification == null)
+                {
+                    _logger.LogInformation(
+                        "Integration event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}] was already processed. Acknowledging message without duplicate notification.",
+                        eventType,
+                        resolvedEventId,
+                        resolvedOrderId,
+                        resolvedCorrelationId);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Notification '{NotificationId}' created for order '{OrderId}' [EventId: {EventId}, CorrelationId: {CorrelationId}].",
+                        notification.Id,
+                        resolvedOrderId,
+                        resolvedEventId,
+                        resolvedCorrelationId);
+                }
+
+                await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts && !cancellationToken.IsCancellationRequested)
+            {
+                var delayMs = (int)(_options.InitialRetryDelayMs * Math.Pow(2, attempt - 1));
+                _logger.LogWarning(
+                    ex,
+                    "Transient error on attempt {Attempt}/{MaxAttempts} processing event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}]. Retrying in {DelayMs}ms...",
+                    attempt,
+                    maxAttempts,
+                    eventType,
+                    resolvedEventId,
+                    resolvedOrderId,
+                    resolvedCorrelationId,
+                    delayMs);
+
+                if (delayMs > 0)
+                {
+                    await Task.Delay(delayMs, cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Exhausted all {MaxAttempts} retry attempts for event '{EventType}' [DeliveryTag: {DeliveryTag}, EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}]. Forwarding to DLQ '{DlQueueName}'.",
+                    maxAttempts,
+                    eventType,
+                    deliveryTag,
+                    resolvedEventId,
+                    resolvedOrderId,
+                    resolvedCorrelationId,
+                    _options.DeadLetterQueueName);
+
+                await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, cancellationToken);
+                return;
+            }
+        }
+    }
+
+    private static bool IsSupportedEventType(string eventType)
+    {
+        return eventType is "OrderCreated" or "OrderStatusChanged" or "OrderCompleted" or "OrderCancelled";
+    }
+
+    private static bool ValidateEnvelopeData(string eventType, ReadOnlyMemory<byte> body)
+    {
+        return eventType switch
+        {
+            "OrderCreated" => JsonSerializer.Deserialize<EventEnvelope<OrderCreatedIntegrationEvent>>(body.Span, SerializerOptions)?.Data != null,
+            "OrderStatusChanged" => JsonSerializer.Deserialize<EventEnvelope<OrderStatusChangedIntegrationEvent>>(body.Span, SerializerOptions)?.Data != null,
+            "OrderCompleted" => JsonSerializer.Deserialize<EventEnvelope<OrderCompletedIntegrationEvent>>(body.Span, SerializerOptions)?.Data != null,
+            "OrderCancelled" => JsonSerializer.Deserialize<EventEnvelope<OrderCancelledIntegrationEvent>>(body.Span, SerializerOptions)?.Data != null,
+            _ => false
+        };
+    }
+
+    private static async Task<Notification?> DispatchEventAsync(
+        string eventType,
+        ReadOnlyMemory<byte> body,
+        IServiceProvider serviceProvider,
+        CancellationToken cancellationToken)
+    {
+        return eventType switch
+        {
+            "OrderCreated" => await serviceProvider
+                .GetRequiredService<ProcessOrderCreatedEventUseCase>()
+                .ExecuteAsync(JsonSerializer.Deserialize<EventEnvelope<OrderCreatedIntegrationEvent>>(body.Span, SerializerOptions)!, cancellationToken),
+
+            "OrderStatusChanged" => await serviceProvider
+                .GetRequiredService<ProcessOrderStatusChangedEventUseCase>()
+                .ExecuteAsync(JsonSerializer.Deserialize<EventEnvelope<OrderStatusChangedIntegrationEvent>>(body.Span, SerializerOptions)!, cancellationToken),
+
+            "OrderCompleted" => await serviceProvider
+                .GetRequiredService<ProcessOrderCompletedEventUseCase>()
+                .ExecuteAsync(JsonSerializer.Deserialize<EventEnvelope<OrderCompletedIntegrationEvent>>(body.Span, SerializerOptions)!, cancellationToken),
+
+            "OrderCancelled" => await serviceProvider
+                .GetRequiredService<ProcessOrderCancelledEventUseCase>()
+                .ExecuteAsync(JsonSerializer.Deserialize<EventEnvelope<OrderCancelledIntegrationEvent>>(body.Span, SerializerOptions)!, cancellationToken),
+
+            _ => throw new InvalidOperationException($"Unsupported event type '{eventType}'.")
+        };
     }
 }

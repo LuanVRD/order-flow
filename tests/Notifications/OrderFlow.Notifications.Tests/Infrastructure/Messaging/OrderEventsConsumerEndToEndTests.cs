@@ -130,6 +130,64 @@ public class OrderEventsConsumerEndToEndTests : IDisposable
         await _channelMock.Received(1).BasicAckAsync(2UL, false, Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task ProcessMessageAsync_ShouldForwardToDlq_WhenPoisonMessageIsReceived()
+    {
+        // Arrange
+        var invalidPayload = Encoding.UTF8.GetBytes("{ \"invalidJson\": [corrupted }");
+        var propsMock = Substitute.For<IReadOnlyBasicProperties>();
+        propsMock.Type.Returns("OrderCreated");
+        propsMock.MessageId.Returns(Guid.NewGuid().ToString());
+        propsMock.CorrelationId.Returns("corr-poison-test");
+
+        // Act
+        await _consumer.ProcessMessageAsync(invalidPayload, propsMock, 3UL, _channelMock);
+
+        // Assert: Poison message is rejected with requeue: false, heading to DLQ
+        await _channelMock.Received(1).BasicNackAsync(3UL, false, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicAckAsync(3UL, Arg.Any<bool>(), Arg.Any<CancellationToken>());
+
+        using var scope = _serviceProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<NotificationsDbContext>();
+        var notifications = await db.Notifications.ToListAsync();
+        notifications.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_ShouldForwardToDlq_WhenDatabaseErrorPersistsAcrossRetries()
+    {
+        // Arrange
+        // Simulate database disruption by closing the connection
+        await _sqliteConnection.CloseAsync();
+
+        var orderId = Guid.NewGuid();
+        var eventId = Guid.NewGuid();
+        var envelope = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
+            eventType: "OrderCreated",
+            data: new OrderCreatedIntegrationEvent(
+                orderId,
+                "Error Scenario",
+                "err@example.com",
+                99m,
+                "Pending",
+                DateTimeOffset.UtcNow),
+            correlationId: "corr-db-error-01",
+            eventId: eventId
+        );
+
+        var json = JsonSerializer.Serialize(envelope);
+        var body = Encoding.UTF8.GetBytes(json);
+        var propsMock = Substitute.For<IReadOnlyBasicProperties>();
+        propsMock.Type.Returns("OrderCreated");
+
+        // Act
+        await _consumer.ProcessMessageAsync(body, propsMock, 4UL, _channelMock);
+
+        // Assert: Retries exhausted, message sent to DLQ via BasicNack(requeue: false)
+        await _channelMock.Received(1).BasicNackAsync(4UL, false, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicAckAsync(4UL, Arg.Any<bool>(), Arg.Any<CancellationToken>());
+    }
+
     public void Dispose()
     {
         _serviceProvider.Dispose();

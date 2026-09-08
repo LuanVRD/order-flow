@@ -64,7 +64,12 @@ public class OrderEventsConsumerTests
             ExchangeName = "orderflow.orders",
             ExchangeType = "topic",
             QueueName = "orderflow.notifications",
-            PrefetchCount = 10
+            DeadLetterExchangeName = "orderflow.notifications.dlx",
+            DeadLetterQueueName = "orderflow.notifications.dlq",
+            DeadLetterRoutingKey = "orderflow.notifications.dlq",
+            PrefetchCount = 10,
+            MaxRetryAttempts = 3,
+            InitialRetryDelayMs = 1
         };
         _options = Options.Create(options);
 
@@ -260,7 +265,7 @@ public class OrderEventsConsumerTests
     }
 
     [Fact]
-    public async Task ProcessMessageAsync_ShouldAck_WhenJsonIsInvalid()
+    public async Task ProcessMessageAsync_ShouldNackWithoutRequeueToDlq_WhenJsonIsInvalid()
     {
         // Arrange
         var invalidJsonBytes = Encoding.UTF8.GetBytes("{ invalid_json ");
@@ -270,12 +275,13 @@ public class OrderEventsConsumerTests
         // Act
         await _consumer.ProcessMessageAsync(invalidJsonBytes, propsMock, 6UL, _channelMock);
 
-        // Assert
-        await _channelMock.Received(1).BasicAckAsync(6UL, false, Arg.Any<CancellationToken>());
+        // Assert: Nack with requeue: false forwards immediately to DLQ
+        await _channelMock.Received(1).BasicNackAsync(6UL, false, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicAckAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task ProcessMessageAsync_ShouldAck_WhenEventTypeIsUnsupported()
+    public async Task ProcessMessageAsync_ShouldNackWithoutRequeueToDlq_WhenEventTypeIsUnsupported()
     {
         // Arrange
         var json = "{\"eventType\":\"UnknownEvent\",\"data\":{}}";
@@ -286,12 +292,78 @@ public class OrderEventsConsumerTests
         // Act
         await _consumer.ProcessMessageAsync(body, propsMock, 7UL, _channelMock);
 
-        // Assert
-        await _channelMock.Received(1).BasicAckAsync(7UL, false, Arg.Any<CancellationToken>());
+        // Assert: Nack with requeue: false forwards immediately to DLQ
+        await _channelMock.Received(1).BasicNackAsync(7UL, false, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicAckAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task ProcessMessageAsync_ShouldNackWithRequeue_WhenUnhandledExceptionOccurs()
+    public async Task ProcessMessageAsync_ShouldNackWithoutRequeueToDlq_WhenEnvelopeDataIsNull()
+    {
+        // Arrange
+        var json = "{\"eventId\":\"" + Guid.NewGuid() + "\",\"eventType\":\"OrderCreated\",\"data\":null}";
+        var body = Encoding.UTF8.GetBytes(json);
+        var propsMock = Substitute.For<IReadOnlyBasicProperties>();
+        propsMock.Type.Returns("OrderCreated");
+
+        // Act
+        await _consumer.ProcessMessageAsync(body, propsMock, 8UL, _channelMock);
+
+        // Assert: Nack with requeue: false forwards immediately to DLQ
+        await _channelMock.Received(1).BasicNackAsync(8UL, false, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicAckAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_ShouldRetryAndAck_WhenTransientExceptionRecoversWithinMaxAttempts()
+    {
+        // Arrange
+        var orderId = Guid.NewGuid();
+        var eventId = Guid.NewGuid();
+        var envelope = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
+            eventType: "OrderCreated",
+            data: new OrderCreatedIntegrationEvent(
+                orderId,
+                "Retry Success User",
+                "retry@example.com",
+                80m,
+                "Pending",
+                DateTimeOffset.UtcNow),
+            correlationId: "corr-retry-01",
+            eventId: eventId
+        );
+
+        var json = JsonSerializer.Serialize(envelope);
+        var body = Encoding.UTF8.GetBytes(json);
+        var propsMock = Substitute.For<IReadOnlyBasicProperties>();
+        propsMock.Type.Returns("OrderCreated");
+
+        int callCount = 0;
+        _processedMessageRepositoryMock.ExistsAsync(eventId, Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                callCount++;
+                if (callCount == 1)
+                {
+                    throw new InvalidOperationException("Transient database timeout on attempt 1");
+                }
+                return Task.FromResult(false);
+            });
+
+        // Act
+        await _consumer.ProcessMessageAsync(body, propsMock, 9UL, _channelMock);
+
+        // Assert
+        callCount.Should().Be(2);
+        await _notificationRepositoryMock.Received(1).AddAsync(
+            Arg.Is<Notification>(n => n.OrderId == orderId),
+            Arg.Any<CancellationToken>());
+        await _channelMock.Received(1).BasicAckAsync(9UL, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicNackAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_ShouldNackWithoutRequeueToDlq_WhenTransientExceptionExhaustsAllRetries()
     {
         // Arrange
         var eventId = Guid.NewGuid();
@@ -313,12 +385,14 @@ public class OrderEventsConsumerTests
         propsMock.Type.Returns("OrderCreated");
 
         _processedMessageRepositoryMock.ExistsAsync(eventId, Arg.Any<CancellationToken>())
-            .ThrowsAsync(new InvalidOperationException("Database connection timeout"));
+            .ThrowsAsync(new InvalidOperationException("Persistent database outage"));
 
         // Act
-        await _consumer.ProcessMessageAsync(body, propsMock, 8UL, _channelMock);
+        await _consumer.ProcessMessageAsync(body, propsMock, 10UL, _channelMock);
 
-        // Assert
-        await _channelMock.Received(1).BasicNackAsync(8UL, false, true, Arg.Any<CancellationToken>());
+        // Assert: Exhausted all 3 attempts, message sent to DLQ via BasicNack(requeue: false)
+        await _processedMessageRepositoryMock.Received(3).ExistsAsync(eventId, Arg.Any<CancellationToken>());
+        await _channelMock.Received(1).BasicNackAsync(10UL, false, false, Arg.Any<CancellationToken>());
+        await _channelMock.DidNotReceive().BasicAckAsync(Arg.Any<ulong>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 }

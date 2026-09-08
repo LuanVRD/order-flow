@@ -15,6 +15,12 @@ public class RabbitMqOptions
     public bool Durable { get; set; } = true;
     public bool AutoDelete { get; set; } = false;
     public ushort PrefetchCount { get; set; } = 10;
+    public string DeadLetterExchangeName { get; set; } = "orderflow.notifications.dlx";
+    public string DeadLetterExchangeType { get; set; } = "direct";
+    public string DeadLetterQueueName { get; set; } = "orderflow.notifications.dlq";
+    public string DeadLetterRoutingKey { get; set; } = "orderflow.notifications.dlq";
+    public int MaxRetryAttempts { get; set; } = 3;
+    public int InitialRetryDelayMs { get; set; } = 500;
     public string[] RoutingKeys { get; set; } =
     [
         "order.created",

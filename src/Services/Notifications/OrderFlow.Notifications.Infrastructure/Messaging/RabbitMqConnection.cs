@@ -92,6 +92,49 @@ public class RabbitMqConnection : IRabbitMqConnection
 
             using var channel = await CreateChannelAsync(cancellationToken);
 
+            // 1. Declare Dead Letter Exchange & Queue
+            _logger.LogInformation(
+                "Declaring Dead Letter Exchange '{DlExchangeName}' (Type: {DlExchangeType}, Durable: {Durable})...",
+                _options.DeadLetterExchangeName,
+                _options.DeadLetterExchangeType,
+                _options.Durable);
+
+            await channel.ExchangeDeclareAsync(
+                exchange: _options.DeadLetterExchangeName,
+                type: _options.DeadLetterExchangeType,
+                durable: _options.Durable,
+                autoDelete: _options.AutoDelete,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            _logger.LogInformation(
+                "Declaring Dead Letter Queue '{DlQueueName}' (Durable: {Durable}, AutoDelete: {AutoDelete})...",
+                _options.DeadLetterQueueName,
+                _options.Durable,
+                _options.AutoDelete);
+
+            await channel.QueueDeclareAsync(
+                queue: _options.DeadLetterQueueName,
+                durable: _options.Durable,
+                exclusive: false,
+                autoDelete: _options.AutoDelete,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            _logger.LogInformation(
+                "Binding Dead Letter Queue '{DlQueueName}' to exchange '{DlExchangeName}' with routing key '{DlRoutingKey}'...",
+                _options.DeadLetterQueueName,
+                _options.DeadLetterExchangeName,
+                _options.DeadLetterRoutingKey);
+
+            await channel.QueueBindAsync(
+                queue: _options.DeadLetterQueueName,
+                exchange: _options.DeadLetterExchangeName,
+                routingKey: _options.DeadLetterRoutingKey,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            // 2. Declare Business Exchange & Main Queue with Dead-Lettering
             _logger.LogInformation(
                 "Declaring exchange '{ExchangeName}' (Type: {ExchangeType}, Durable: {Durable})...",
                 _options.ExchangeName,
@@ -106,9 +149,16 @@ public class RabbitMqConnection : IRabbitMqConnection
                 arguments: null,
                 cancellationToken: cancellationToken);
 
+            var mainQueueArgs = new Dictionary<string, object?>
+            {
+                { "x-dead-letter-exchange", _options.DeadLetterExchangeName },
+                { "x-dead-letter-routing-key", _options.DeadLetterRoutingKey }
+            };
+
             _logger.LogInformation(
-                "Declaring queue '{QueueName}' (Durable: {Durable}, AutoDelete: {AutoDelete})...",
+                "Declaring queue '{QueueName}' with DLX '{DlExchangeName}' (Durable: {Durable}, AutoDelete: {AutoDelete})...",
                 _options.QueueName,
+                _options.DeadLetterExchangeName,
                 _options.Durable,
                 _options.AutoDelete);
 
@@ -117,7 +167,7 @@ public class RabbitMqConnection : IRabbitMqConnection
                 durable: _options.Durable,
                 exclusive: false,
                 autoDelete: _options.AutoDelete,
-                arguments: null,
+                arguments: mainQueueArgs,
                 cancellationToken: cancellationToken);
 
             foreach (var routingKey in _options.RoutingKeys)
@@ -138,8 +188,9 @@ public class RabbitMqConnection : IRabbitMqConnection
 
             _topologyInitialized = true;
             _logger.LogInformation(
-                "RabbitMQ topology initialized successfully for queue '{QueueName}' and exchange '{ExchangeName}'.",
+                "RabbitMQ topology initialized successfully for queue '{QueueName}', DLQ '{DlQueueName}' and exchange '{ExchangeName}'.",
                 _options.QueueName,
+                _options.DeadLetterQueueName,
                 _options.ExchangeName);
         }
         finally

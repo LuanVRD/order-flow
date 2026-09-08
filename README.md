@@ -78,6 +78,46 @@ dotnet test OrderFlow.sln
 
 ---
 
+## 📬 Mensageria, Resiliência e Dead Letter Queue (DLQ)
+
+O serviço de notificações (`OrderFlow.Notifications.Worker`) implementa tratamento explícito de falhas com proteção contra loops infinitos e perda de mensagens:
+
+- **Política de Retry**: Até 3 tentativas com backoff exponencial para falhas transitórias (banco indisponível, timeouts de rede, concorrência).
+- **Tratamento de Poison Messages**: Mensagens definitivamente inválidas (JSON corrompido, envelope sem payload, tipo de evento desconhecido) são rejeitadas imediatamente (`requeue: false`), sendo enviadas diretamente para a DLQ sem desperdiçar retries.
+- **Dead Letter Topology**:
+  - **Exchange DLX**: `orderflow.notifications.dlx` (Direct)
+  - **Fila DLQ**: `orderflow.notifications.dlq` (Durable)
+  - **Fila Principal**: `orderflow.notifications` com `x-dead-letter-exchange: orderflow.notifications.dlx` e `x-dead-letter-routing-key: orderflow.notifications.dlq`.
+- **Confirmação Estrita**: Mensagens só recebem `BasicAck` após processamento com sucesso (ou confirmação de duplicata idempotente). Em falhas terminais, o `BasicNack(requeue: false)` garante o roteamento automático para a DLQ pelo RabbitMQ.
+
+### 🔍 Como Visualizar e Inspecionar a DLQ no RabbitMQ Management
+
+1. **Acesse o painel web do RabbitMQ**:
+   Abra no navegador: `http://localhost:15672` (Usuário padrão: `guest` / Senha: `guest`).
+
+2. **Navegue até as Filas**:
+   Clique no menu **Queues and Streams** no topo do painel.
+
+3. **Localize a fila da DLQ**:
+   Na lista de filas, clique em `orderflow.notifications.dlq`.
+
+4. **Inspecione as mensagens retidas**:
+   - Role até a seção **Get messages**.
+   - Defina **Messages**: `1` (ou a quantidade desejada).
+   - Defina **Requeue**: `Yes` (para apenas inspecionar sem remover) ou `No` (para consumir e remover da DLQ).
+   - Clique no botão **Get Message(s)**.
+
+5. **O que analisar na mensagem na DLQ**:
+   - **Payload**: O conteúdo JSON original do evento com os dados intactos (`EventId`, `Data`, `CorrelationId`).
+   - **Headers (`x-death`)**: Array contendo metadados injetados nativamente pelo RabbitMQ:
+     - `reason`: Motivo da rejeição (`rejected`).
+     - `queue`: Fila de origem onde ocorreu a falha (`orderflow.notifications`).
+     - `count`: Quantidade de vezes que a mensagem sofreu dead-lettering.
+     - `time`: Timestamp exato da ocorrência do erro.
+   - **Properties**: `correlation_id`, `message_id`, `type` e `content_type`.
+
+---
+
 ## 📖 Documentação Detalhada
 
 Para detalhes aprofundados sobre decisões de design, direções de dependência entre camadas, resiliência (Retry e DLQ) e idempotência, consulte o arquivo [ARCHITECTURE.md](file:///e:/projetos/order-flow/ARCHITECTURE.md).
