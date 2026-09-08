@@ -50,7 +50,8 @@ builder.Services.AddCors(options =>
     {
         policy.AllowAnyOrigin()
               .AllowAnyHeader()
-              .AllowAnyMethod();
+              .AllowAnyMethod()
+              .WithExposedHeaders(CorrelationConstants.HeaderName);
     });
 });
 
@@ -84,12 +85,13 @@ app.UseSerilogRequestLogging(options =>
 
 app.UseExceptionHandler();
 
+app.UseCors("DevelopmentCors");
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
     app.MapOpenApi();
-    app.UseCors("DevelopmentCors");
 }
 else
 {
