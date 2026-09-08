@@ -118,6 +118,21 @@ O serviço de notificações (`OrderFlow.Notifications.Worker`) implementa trata
 
 ---
 
+## 📊 Observabilidade e Logs Estruturados (Serilog)
+
+O OrderFlow utiliza **Serilog** com suporte nativo a rastreabilidade ponta a ponta via `CorrelationId` e enriquecimento de propriedades em ambos os microsserviços:
+
+- **Propriedades Estruturadas**: `ServiceName`, `CorrelationId`, `OrderId`, `EventId`, `EventType`, `DeliveryTag`, `StatusCode`, etc.
+- **Saída em Desenvolvimento**: Formato textual com destaque e contexto:
+  ```text
+  [10:15:30 INF] [Orders.Api] [9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d] Order f47ac10b-58cc-4372-a567-0e02b2c3d479 successfully created with status 'Pending'.
+  ```
+- **Saída para Containers (JSON)**: Ativada em produção ou configurando `"Serilog:UseJsonConsole": true`, emitindo formato compacto JSON (`clef`) pronto para ingestão em ElasticSearch, Grafana Loki, Fluentbit ou AWS CloudWatch.
+- **Segurança de Dados**: Credenciais de banco/RabbitMQ e dados sensíveis de usuários são mascarados/omitidos.
+
+---
+
 ## 📖 Documentação Detalhada
 
-Para detalhes aprofundados sobre decisões de design, direções de dependência entre camadas, resiliência (Retry e DLQ) e idempotência, consulte o arquivo [ARCHITECTURE.md](file:///e:/projetos/order-flow/ARCHITECTURE.md).
+Para detalhes aprofundados sobre decisões de design, direções de dependência entre camadas, resiliência (Retry e DLQ), idempotência e exemplos completos de logs JSON, consulte o arquivo [ARCHITECTURE.md](file:///e:/projetos/order-flow/ARCHITECTURE.md).
+

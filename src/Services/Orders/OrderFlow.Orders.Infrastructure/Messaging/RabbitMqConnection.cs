@@ -60,7 +60,22 @@ public class RabbitMqConnection : IRabbitMqConnection
         }
         catch (BrokerUnreachableException ex)
         {
-            _logger.LogError(ex, "Failed to connect to RabbitMQ broker at {HostName}:{Port}.", _options.HostName, _options.Port);
+            _logger.LogError(
+                ex,
+                "Failed to connect to RabbitMQ broker: Broker is unreachable at {HostName}:{Port} (vHost: {VirtualHost}).",
+                _options.HostName,
+                _options.Port,
+                _options.VirtualHost);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Unexpected error while establishing connection to RabbitMQ broker at {HostName}:{Port} (vHost: {VirtualHost}).",
+                _options.HostName,
+                _options.Port,
+                _options.VirtualHost);
             throw;
         }
         finally

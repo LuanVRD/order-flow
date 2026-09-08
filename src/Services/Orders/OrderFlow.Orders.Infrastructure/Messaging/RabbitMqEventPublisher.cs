@@ -97,12 +97,18 @@ public class RabbitMqEventPublisher : IEventPublisher
         }
         catch (Exception ex)
         {
+            var (_, eventType, correlationId, _) = ExtractMetadata(message);
+            var effectiveCorrId = !string.IsNullOrWhiteSpace(correlationId)
+                ? correlationId
+                : _correlationContextAccessor?.CorrelationId;
+
             _logger.LogError(
                 ex,
-                "Failed to publish event of type '{MessageType}' to exchange '{Exchange}' with routing key '{RoutingKey}'.",
-                typeof(T).Name,
+                "Failed to publish integration event '{EventType}' to exchange '{Exchange}' with routing key '{RoutingKey}' [CorrelationId: {CorrelationId}].",
+                eventType ?? typeof(T).Name,
                 _options.ExchangeName,
-                routingKey);
+                routingKey,
+                effectiveCorrId ?? "N/A");
 
             throw;
         }

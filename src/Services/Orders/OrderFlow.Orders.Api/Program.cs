@@ -1,9 +1,33 @@
 using System.Text.Json.Serialization;
+using OrderFlow.Messaging.Contracts.Correlation;
 using OrderFlow.Orders.Api.Middlewares;
 using OrderFlow.Orders.Application;
 using OrderFlow.Orders.Infrastructure;
+using Serilog;
+using Serilog.Formatting.Compact;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, services, configuration) =>
+{
+    configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .Enrich.WithProperty("ServiceName", "Orders.Api")
+        .Enrich.WithProperty("Environment", context.HostingEnvironment.EnvironmentName);
+
+    var useJsonConsole = context.Configuration.GetValue<bool>("Serilog:UseJsonConsole");
+    if (useJsonConsole || !context.HostingEnvironment.IsDevelopment())
+    {
+        configuration.WriteTo.Console(new CompactJsonFormatter());
+    }
+    else
+    {
+        configuration.WriteTo.Console(
+            outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] [{ServiceName}] [{CorrelationId}] {Message:lj}{NewLine}{Exception}");
+    }
+});
 
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -34,6 +58,19 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();
+
+app.UseSerilogRequestLogging(options =>
+{
+    options.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms";
+    options.EnrichDiagnosticContext = (diagnosticContext, httpContext) =>
+    {
+        if (httpContext.Response.Headers.TryGetValue(CorrelationConstants.HeaderName, out var corrId))
+        {
+            diagnosticContext.Set(CorrelationConstants.PropertyName, corrId.ToString());
+        }
+    };
+});
+
 app.UseExceptionHandler();
 
 if (app.Environment.IsDevelopment())
@@ -53,3 +90,4 @@ app.MapControllers();
 app.Run();
 
 public partial class Program { }
+

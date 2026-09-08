@@ -176,4 +176,165 @@ O fluxo de rastreabilidade ponta a ponta correlaciona qualquer requisição HTTP
    - O `OrderEventsConsumer` recupera o `CorrelationId` das propriedades da mensagem, dos headers AMQP ou do payload do envelope JSON.
    - Um escopo de log (`_logger.BeginScope`) é aberto com a chave `CorrelationId`, assegurando que todos os logs de consumo, retries, encaminhamento para DLQ e persistência de notificações compartilhem o mesmo identificador da requisição original.
 
+---
 
+## 5. Observabilidade e Logs Estruturados (Serilog)
+
+O OrderFlow adota **Serilog** como motor de logging unificado para todos os executáveis (`OrderFlow.Orders.Api` e `OrderFlow.Notifications.Worker`), assegurando emissão de telemetria estruturada de alta fidelidade sem interpolação de strings.
+
+### 5.1 Diretrizes de Logging Estruturado
+
+1. **Message Templates Sem Interpolação**:
+   - **Incorreto**: `_logger.LogInformation($"Order {order.Id} created")` (gera strings opacas e descarta índices de busca nos coletores).
+   - **Correto**: `_logger.LogInformation("Order {OrderId} created successfully with status '{OrderStatus}'.", order.Id, order.Status)` (preserva propriedades indexáveis no JSON).
+
+2. **Propriedades Canônicas Globais**:
+   - `ServiceName`: Nome do serviço (`Orders.Api` ou `Notifications.Worker`).
+   - `Environment`: Ambiente de execução (`Development`, `Staging`, `Production`).
+   - `CorrelationId`: Identificador distribuído da operação ponta a ponta.
+   - `OrderId`: Identificador do pedido quando aplicável.
+   - `EventId`: UUID do evento de integração.
+   - `EventType`: Nome canônico do evento de integração (`OrderCreated`, etc.).
+   - `DeliveryTag`: Identificador da mensagem no canal AMQP.
+
+3. **Filtragem de Ruído (Noise Reduction)**:
+   - Overrides nos arquivos de configuração reduzem logs verbosos dos frameworks `Microsoft`, `System` e `Microsoft.AspNetCore` para `Warning`, mantendo `Microsoft.Hosting.Lifetime` e logs da aplicação em `Information`.
+   - `UseSerilogRequestLogging` substitui as múltiplas linhas padrão do ASP.NET Core por um único log conciso por requisição HTTP.
+
+4. **Segurança e Sanitização de Dados Sensíveis**:
+   - Senhas, credenciais RabbitMQ e tokens de autenticação são estritamente omitidos dos logs de conexão.
+   - Não são despejados payloads brutos inteiros com dados sensíveis de clientes; apenas identificadores operacionais (`OrderId`, `CustomerEmail`, `TotalAmount`, `Status`) são registrados.
+
+---
+
+### 5.2 Saída para Containers (JSON Estruturado)
+
+Em ambientes de contêineres (Docker/Kubernetes), a flag `Serilog:UseJsonConsole=true` (ou execução fora de `Development`) ativa o `CompactJsonFormatter` (`clef`), permitindo que coletores como Fluentbit, Promtail, Vector e Logstash ingiram logs sem necessidade de parsing regex frágil.
+
+Em ambiente local de desenvolvimento, a saída padrão utiliza template textual colorido e legível:
+```text
+[{Timestamp:HH:mm:ss} {Level:u3}] [{ServiceName}] [{CorrelationId}] {Message:lj}{NewLine}{Exception}
+```
+
+---
+
+### 5.3 Exemplos de Logs Estruturados em JSON (`CompactJsonFormatter`)
+
+#### 1. Requisição HTTP de Criação de Pedido (Orders API)
+```json
+{
+  "@t": "2026-09-08T10:15:30.1234567Z",
+  "@mt": "Handling order creation request for customer '{CustomerEmail}' with total amount {TotalAmount}.",
+  "@l": "Information",
+  "CustomerEmail": "cliente@orderflow.com",
+  "TotalAmount": 250.00,
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "ServiceName": "Orders.Api",
+  "Environment": "Production"
+}
+```
+
+#### 2. Publicação de Evento de Integração no RabbitMQ
+```json
+{
+  "@t": "2026-09-08T10:15:30.2451234Z",
+  "@mt": "Integration event '{EventType}' successfully published to exchange '{Exchange}' with routing key '{RoutingKey}' [EventId: {EventId}, CorrelationId: {CorrelationId}].",
+  "@l": "Information",
+  "EventType": "OrderCreated",
+  "Exchange": "orderflow.orders",
+  "RoutingKey": "order.created",
+  "EventId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "ServiceName": "Orders.Api",
+  "Environment": "Production"
+}
+```
+
+#### 3. Conclusão da Requisição HTTP (Serilog Request Logging)
+```json
+{
+  "@t": "2026-09-08T10:15:30.2908765Z",
+  "@mt": "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms",
+  "@l": "Information",
+  "RequestMethod": "POST",
+  "RequestPath": "/api/orders",
+  "StatusCode": 201,
+  "Elapsed": 45.2341,
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "ServiceName": "Orders.Api",
+  "Environment": "Production"
+}
+```
+
+#### 4. Consumo e Processamento de Evento (Notifications Worker)
+```json
+{
+  "@t": "2026-09-08T10:15:30.3501200Z",
+  "@mt": "Processing integration event '{EventType}' [Attempt {Attempt}/{MaxAttempts}] [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}].",
+  "@l": "Information",
+  "EventType": "OrderCreated",
+  "Attempt": 1,
+  "MaxAttempts": 3,
+  "EventId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+  "OrderId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "ServiceName": "Notifications.Worker",
+  "Environment": "Production"
+}
+```
+
+#### 5. Falha Transitória e Retry com Backoff Exponencial
+```json
+{
+  "@t": "2026-09-08T10:15:30.4109800Z",
+  "@mt": "Transient error on attempt {Attempt}/{MaxAttempts} processing event '{EventType}' [EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}]. Retrying in {DelayMs}ms...",
+  "@l": "Warning",
+  "@x": "Npgsql.NpgsqlException: Connection timeout...",
+  "Attempt": 1,
+  "MaxAttempts": 3,
+  "EventType": "OrderCreated",
+  "EventId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+  "OrderId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "DelayMs": 500,
+  "ServiceName": "Notifications.Worker",
+  "Environment": "Production"
+}
+```
+
+#### 6. Exaustão de Retries e Encaminhamento para DLQ
+```json
+{
+  "@t": "2026-09-08T10:15:33.9201400Z",
+  "@mt": "Exhausted all {MaxAttempts} retry attempts for event '{EventType}' [DeliveryTag: {DeliveryTag}, EventId: {EventId}, OrderId: {OrderId}, CorrelationId: {CorrelationId}]. Forwarding to DLQ '{DlQueueName}'.",
+  "@l": "Error",
+  "@x": "System.TimeoutException: Database operation timed out...",
+  "MaxAttempts": 3,
+  "EventType": "OrderCreated",
+  "DeliveryTag": 1,
+  "EventId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+  "OrderId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "DlQueueName": "orderflow.notifications.dlq",
+  "ServiceName": "Notifications.Worker",
+  "Environment": "Production"
+}
+```
+
+#### 7. Exceção Tratada no GlobalExceptionHandler
+```json
+{
+  "@t": "2026-09-08T10:15:35.1002200Z",
+  "@mt": "Unhandled server exception occurred while processing {Method} {Path} [StatusCode: {StatusCode}, ExceptionType: {ExceptionType}]: {ErrorMessage}",
+  "@l": "Error",
+  "@x": "System.InvalidOperationException: Database unavailable...",
+  "Method": "POST",
+  "Path": "/api/orders",
+  "StatusCode": 500,
+  "ExceptionType": "InvalidOperationException",
+  "ErrorMessage": "Database unavailable",
+  "CorrelationId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "ServiceName": "Orders.Api",
+  "Environment": "Production"
+}
+```

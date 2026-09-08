@@ -20,9 +20,30 @@ public class GlobalExceptionHandler : IExceptionHandler
         Exception exception,
         CancellationToken cancellationToken)
     {
-        _logger.LogError(exception, "An exception occurred: {Message}", exception.Message);
-
         var (statusCode, title, detail, errors) = MapException(exception);
+
+        if (statusCode >= StatusCodes.Status500InternalServerError)
+        {
+            _logger.LogError(
+                exception,
+                "Unhandled server exception occurred while processing {Method} {Path} [StatusCode: {StatusCode}, ExceptionType: {ExceptionType}]: {ErrorMessage}",
+                httpContext.Request.Method,
+                httpContext.Request.Path.Value,
+                statusCode,
+                exception.GetType().Name,
+                exception.Message);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Client error encountered while processing {Method} {Path} [StatusCode: {StatusCode}, Title: '{Title}', ExceptionType: {ExceptionType}]: {ErrorMessage}",
+                httpContext.Request.Method,
+                httpContext.Request.Path.Value,
+                statusCode,
+                title,
+                exception.GetType().Name,
+                exception.Message);
+        }
 
         var problemDetails = new ProblemDetails
         {
