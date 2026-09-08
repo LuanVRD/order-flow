@@ -112,6 +112,10 @@ public class OrdersControllerTests : IClassFixture<CustomWebApplicationFactory>
 
         // Assert
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>(_jsonOptions);
+        Assert.NotNull(problem);
+        Assert.Equal(400, problem.Status);
+        Assert.Equal("Validation Error", problem.Title);
     }
 
     [Fact]
@@ -195,6 +199,64 @@ public class OrdersControllerTests : IClassFixture<CustomWebApplicationFactory>
         var cancelledOrder = await response.Content.ReadFromJsonAsync<OrderResponse>(_jsonOptions);
         Assert.NotNull(cancelledOrder);
         Assert.Equal(OrderStatus.Cancelled, cancelledOrder.Status);
+    }
+
+    [Fact]
+    public async Task UpdateStatus_ShouldReturn404NotFound_WhenOrderDoesNotExist()
+    {
+        // Arrange
+        var updateRequest = new UpdateOrderStatusRequest(OrderStatus.Processing);
+
+        // Act
+        var response = await _client.PatchAsJsonAsync($"/api/orders/{Guid.NewGuid()}/status", updateRequest, _jsonOptions);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateStatus_ShouldReturn400BadRequest_WhenTransitionIsInvalid()
+    {
+        // Arrange - Criar pedido (Status = Pending) e tentar mudar diretamente para Completed (proibido)
+        var createResponse = await _client.PostAsJsonAsync("/api/orders", new CreateOrderCommand("Lucas", "lucas@example.com", 200.00m), _jsonOptions);
+        var createdOrder = await createResponse.Content.ReadFromJsonAsync<OrderResponse>(_jsonOptions);
+        Assert.NotNull(createdOrder);
+
+        var updateRequest = new UpdateOrderStatusRequest(OrderStatus.Completed);
+
+        // Act
+        var response = await _client.PatchAsJsonAsync($"/api/orders/{createdOrder.Id}/status", updateRequest, _jsonOptions);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancelOrder_ShouldReturn404NotFound_WhenOrderDoesNotExist()
+    {
+        // Act
+        var response = await _client.PostAsync($"/api/orders/{Guid.NewGuid()}/cancel", null);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancelOrder_ShouldReturn400BadRequest_WhenOrderIsAlreadyCompleted()
+    {
+        // Arrange - Criar pedido, iniciar processamento e concluir
+        var createResponse = await _client.PostAsJsonAsync("/api/orders", new CreateOrderCommand("Julia", "julia@example.com", 120.00m), _jsonOptions);
+        var createdOrder = await createResponse.Content.ReadFromJsonAsync<OrderResponse>(_jsonOptions);
+        Assert.NotNull(createdOrder);
+
+        await _client.PatchAsJsonAsync($"/api/orders/{createdOrder.Id}/status", new UpdateOrderStatusRequest(OrderStatus.Processing), _jsonOptions);
+        await _client.PatchAsJsonAsync($"/api/orders/{createdOrder.Id}/status", new UpdateOrderStatusRequest(OrderStatus.Completed), _jsonOptions);
+
+        // Act - Tentar cancelar pedido já concluído
+        var response = await _client.PostAsync($"/api/orders/{createdOrder.Id}/cancel", null);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]

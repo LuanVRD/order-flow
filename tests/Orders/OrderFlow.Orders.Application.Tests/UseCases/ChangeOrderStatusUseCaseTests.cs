@@ -79,6 +79,32 @@ public class ChangeOrderStatusUseCaseTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_WithValidTransitionToCancelled_ShouldPublishStatusChangedAndCancelledEvents()
+    {
+        // Arrange
+        var order = new Order("Alice", "alice@example.com", 100m);
+        _repository.GetByIdAsync(order.Id, Arg.Any<CancellationToken>()).Returns(order);
+        var command = new ChangeOrderStatusCommand(order.Id, OrderStatus.Cancelled);
+
+        // Act
+        var result = await _useCase.ExecuteAsync(command, CancellationToken.None);
+
+        // Assert
+        result.Status.Should().Be(OrderStatus.Cancelled);
+        await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        await _eventPublisher.Received(1).PublishAsync(
+            Arg.Is<EventEnvelope<OrderStatusChangedIntegrationEvent>>(e => e.Data.NewStatus == "Cancelled"),
+            Arg.Is<string>(rk => rk == "order.status.changed"),
+            Arg.Any<CancellationToken>()
+        );
+        await _eventPublisher.Received(1).PublishAsync(
+            Arg.Is<EventEnvelope<OrderCancelledIntegrationEvent>>(e => e.Data.OrderId == order.Id && e.Data.PreviousStatus == "Pending"),
+            Arg.Is<string>(rk => rk == "order.cancelled"),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
     public async Task ExecuteAsync_WhenOrderNotFound_ShouldThrowNotFoundException()
     {
         // Arrange

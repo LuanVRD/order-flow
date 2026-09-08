@@ -163,7 +163,61 @@ O OrderFlow utiliza **Serilog** com suporte nativo a rastreabilidade ponta a pon
 
 ---
 
+## 🧪 Estratégia e Execução de Testes
+
+A suíte de testes do OrderFlow foi desenhada para garantir alta fidelidade aos fluxos de negócio críticos e contratos de integração sem buscar coberturas artificiais de 100%:
+
+### 🏛️ Estrutura da Pirâmide de Testes
+
+1. **Testes de Domínio (Unitários)**:
+   - Validação de regras e invariantes de negócio na entidade `Order` (`OrderFlow.Orders.Domain.Tests`).
+   - Cobertura exaustiva de transições válidas e inválidas da máquina de estados (`Pending -> Processing -> Completed / Cancelled`).
+   - Geração correta e isolada de eventos de domínio (`OrderCreatedDomainEvent`, `OrderStatusChangedDomainEvent`, etc.).
+   - Sanitização de entradas e validação de invariantes sem dependência de I/O externo.
+
+2. **Testes de Aplicação (Unitários com Mocks)**:
+   - Cobertura dos casos de uso de criação, consulta por ID, listagem, alteração de status e cancelamento (`OrderFlow.Orders.Application.Tests`).
+   - Validação de publicação de contratos de mensageria envelopados (`EventEnvelope<T>`) com propagação correta de `CorrelationId`.
+   - Idempotência nos casos de uso de notificações (`OrderFlow.Notifications.Tests.Application`), validando descarte seguro de mensagens duplicadas sem reprocessamento ou efeitos colaterais.
+
+3. **Testes de Integração HTTP (WebApplicationFactory)**:
+   - Teste de comportamento dos endpoints REST da Orders API (`OrderFlow.Orders.IntegrationTests.Controllers`).
+   - Respostas esperadas e mapeamentos de status: `201 Created` (com header `Location`), `400 Bad Request` (com `ProblemDetails` e mensagens de validação detalhadas) e `404 Not Found`.
+   - Propagação e injeção do header HTTP `X-Correlation-ID`.
+
+4. **Testes de Persistência Real (PostgreSQL & Testcontainers)**:
+   - Testes de integração de banco de dados executando contra instâncias reais e efêmeras de PostgreSQL via **Testcontainers** (`Testcontainers.PostgreSql`).
+   - Execução das migrações reais do Entity Framework Core (`Database.MigrateAsync()`).
+   - Validação de tipos nativos do PostgreSQL (`numeric(18,2)`, `varchar`, `timestamp with time zone`) e restrições de chave primária/unicidade para tabelas como `ProcessedMessages` e `Notifications`.
+
+---
+
+### ▶️ Como Executar os Testes
+
+#### 1. Executar Toda a Suíte (Unitários + Integração):
+```bash
+dotnet test
+```
+
+#### 2. Executar Projetos Específicos:
+```bash
+# Testes unitários de Domínio (Orders)
+dotnet test tests/Orders/OrderFlow.Orders.Domain.Tests/
+
+# Testes unitários de Aplicação (Orders)
+dotnet test tests/Orders/OrderFlow.Orders.Application.Tests/
+
+# Testes de Notificações (Aplicação, Domínio, Idempotência e Persistência)
+dotnet test tests/Notifications/OrderFlow.Notifications.Tests/
+
+# Testes de Integração de Orders (HTTP Controllers + Repositórios PostgreSQL)
+dotnet test tests/Orders/OrderFlow.Orders.IntegrationTests/
+```
+
+---
+
 ## 📖 Documentação Detalhada
 
 Para detalhes aprofundados sobre decisões de design, direções de dependência entre camadas, resiliência (Retry e DLQ), idempotência e exemplos completos de logs JSON, consulte o arquivo [ARCHITECTURE.md](file:///e:/projetos/order-flow/ARCHITECTURE.md).
+
 

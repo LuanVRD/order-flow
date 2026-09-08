@@ -292,6 +292,28 @@ public class OrderTests
     }
 
     [Fact]
+    public void ChangeStatus_PendingToCompleted_ShouldThrowDomainException()
+    {
+        // Arrange
+        var order = new Order("John Doe", "john.doe@example.com", 100m);
+
+        // Act & Assert
+        var exception = Assert.Throws<DomainException>(() => order.Complete());
+        Assert.Contains("Cannot transition order status", exception.Message);
+    }
+
+    [Fact]
+    public void CreateOrder_WithWhitespaceAroundStrings_ShouldTrimProperties()
+    {
+        // Arrange & Act
+        var order = new Order("  John Doe  ", "  john.doe@example.com  ", 100m);
+
+        // Assert
+        Assert.Equal("John Doe", order.CustomerName);
+        Assert.Equal("john.doe@example.com", order.CustomerEmail);
+    }
+
+    [Fact]
     public void ClearDomainEvents_ShouldRemoveAllRegisteredEvents()
     {
         // Arrange
