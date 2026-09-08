@@ -26,6 +26,9 @@
     <ProjectReference Include="..\..\..\src\Services\Orders\OrderFlow.Orders.Api\OrderFlow.Orders.Api.csproj" />
     <ProjectReference Include="..\..\..\src\Services\Orders\OrderFlow.Orders.Infrastructure\OrderFlow.Orders.Infrastructure.csproj" />
     <ProjectReference Include="..\..\..\src\Services\Orders\OrderFlow.Orders.Application\OrderFlow.Orders.Application.csproj" />
+    <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Application\OrderFlow.Notifications.Application.csproj" />
+    <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Domain\OrderFlow.Notifications.Domain.csproj" />
+    <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Infrastructure\OrderFlow.Notifications.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

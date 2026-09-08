@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using OrderFlow.Messaging.Contracts.Correlation;
 using OrderFlow.Orders.Application.Interfaces;
 using RabbitMQ.Client;
 
@@ -12,6 +13,7 @@ public class RabbitMqEventPublisher : IEventPublisher
     private readonly IRabbitMqConnection _connection;
     private readonly RabbitMqOptions _options;
     private readonly ILogger<RabbitMqEventPublisher> _logger;
+    private readonly ICorrelationContextAccessor? _correlationContextAccessor;
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -23,11 +25,13 @@ public class RabbitMqEventPublisher : IEventPublisher
     public RabbitMqEventPublisher(
         IRabbitMqConnection connection,
         IOptions<RabbitMqOptions> options,
-        ILogger<RabbitMqEventPublisher> logger)
+        ILogger<RabbitMqEventPublisher> logger,
+        ICorrelationContextAccessor? correlationContextAccessor = null)
     {
         _connection = connection;
         _options = options.Value;
         _logger = logger;
+        _correlationContextAccessor = correlationContextAccessor;
     }
 
     public async Task PublishAsync<T>(
@@ -43,8 +47,23 @@ public class RabbitMqEventPublisher : IEventPublisher
             await _connection.InitializeTopologyAsync(cancellationToken);
 
             var (eventId, eventType, correlationId, occurredAt) = ExtractMetadata(message);
+            var effectiveCorrelationId = !string.IsNullOrWhiteSpace(correlationId)
+                ? correlationId
+                : _correlationContextAccessor?.CorrelationId;
 
             var body = JsonSerializer.SerializeToUtf8Bytes(message, SerializerOptions);
+
+            var headers = new Dictionary<string, object?>
+            {
+                ["eventType"] = eventType ?? typeof(T).Name,
+                ["publishedAt"] = DateTimeOffset.UtcNow.ToString("o")
+            };
+
+            if (!string.IsNullOrWhiteSpace(effectiveCorrelationId))
+            {
+                headers[CorrelationConstants.HeaderName] = effectiveCorrelationId;
+                headers[CorrelationConstants.PropertyName] = effectiveCorrelationId;
+            }
 
             var properties = new BasicProperties
             {
@@ -52,14 +71,10 @@ public class RabbitMqEventPublisher : IEventPublisher
                 ContentEncoding = "utf-8",
                 DeliveryMode = DeliveryModes.Persistent,
                 MessageId = eventId?.ToString() ?? Guid.NewGuid().ToString(),
-                CorrelationId = correlationId,
+                CorrelationId = effectiveCorrelationId,
                 Type = eventType ?? typeof(T).Name,
                 Timestamp = new AmqpTimestamp(occurredAt?.ToUnixTimeSeconds() ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
-                Headers = new Dictionary<string, object?>
-                {
-                    ["eventType"] = eventType ?? typeof(T).Name,
-                    ["publishedAt"] = DateTimeOffset.UtcNow.ToString("o")
-                }
+                Headers = headers
             };
 
             using var channel = await _connection.CreateChannelAsync(cancellationToken);

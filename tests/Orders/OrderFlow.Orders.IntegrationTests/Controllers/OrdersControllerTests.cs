@@ -196,4 +196,43 @@ public class OrdersControllerTests : IClassFixture<CustomWebApplicationFactory>
         Assert.NotNull(cancelledOrder);
         Assert.Equal(OrderStatus.Cancelled, cancelledOrder.Status);
     }
+
+    [Fact]
+    public async Task CreateOrder_ShouldReturnCorrelationIdHeader_WhenHeaderIsMissingInRequest()
+    {
+        // Arrange
+        var command = new CreateOrderCommand("Trace Test User", "trace@example.com", 199.90m);
+
+        // Act
+        var response = await _client.PostAsJsonAsync("/api/orders", command, _jsonOptions);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.True(response.Headers.Contains("X-Correlation-ID"));
+        var correlationId = response.Headers.GetValues("X-Correlation-ID").FirstOrDefault();
+        Assert.NotNull(correlationId);
+        Assert.True(Guid.TryParse(correlationId, out _));
+    }
+
+    [Fact]
+    public async Task CreateOrder_ShouldEchoCorrelationIdHeader_WhenHeaderIsProvidedInRequest()
+    {
+        // Arrange
+        var customCorrelationId = "custom-http-corr-id-98765";
+        var command = new CreateOrderCommand("Custom Trace User", "custom@example.com", 299.90m);
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
+        {
+            Content = JsonContent.Create(command, options: _jsonOptions)
+        };
+        request.Headers.Add("X-Correlation-ID", customCorrelationId);
+
+        // Act
+        var response = await _client.SendAsync(request);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.True(response.Headers.Contains("X-Correlation-ID"));
+        var correlationId = response.Headers.GetValues("X-Correlation-ID").FirstOrDefault();
+        Assert.Equal(customCorrelationId, correlationId);
+    }
 }

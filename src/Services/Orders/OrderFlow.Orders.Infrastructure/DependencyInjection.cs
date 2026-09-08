@@ -14,6 +14,7 @@ public static class DependencyInjection
     {
         services.AddScoped<IOrderRepository, OrderRepository>();
 
+        services.AddScoped<OrderFlow.Messaging.Contracts.Correlation.ICorrelationContextAccessor, OrderFlow.Messaging.Contracts.Correlation.CorrelationContextAccessor>();
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
         services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
         services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();

@@ -1,4 +1,5 @@
 using FluentValidation;
+using OrderFlow.Messaging.Contracts.Correlation;
 using OrderFlow.Messaging.Contracts.Events;
 using OrderFlow.Orders.Application.DTOs;
 using OrderFlow.Orders.Application.Exceptions;
@@ -12,15 +13,18 @@ public class CancelOrderUseCase
     private readonly IOrderRepository _repository;
     private readonly IEventPublisher _eventPublisher;
     private readonly IValidator<CancelOrderCommand> _validator;
+    private readonly ICorrelationContextAccessor? _correlationContextAccessor;
 
     public CancelOrderUseCase(
         IOrderRepository repository,
         IEventPublisher eventPublisher,
-        IValidator<CancelOrderCommand> validator)
+        IValidator<CancelOrderCommand> validator,
+        ICorrelationContextAccessor? correlationContextAccessor = null)
     {
         _repository = repository;
         _eventPublisher = eventPublisher;
         _validator = validator;
+        _correlationContextAccessor = correlationContextAccessor;
     }
 
     public async Task<OrderResponse> ExecuteAsync(CancelOrderCommand command, CancellationToken cancellationToken = default)
@@ -38,6 +42,8 @@ public class CancelOrderUseCase
 
         await _repository.SaveChangesAsync(cancellationToken);
 
+        var correlationId = _correlationContextAccessor?.CorrelationId;
+
         var statusChangedEvent = EventEnvelope<OrderStatusChangedIntegrationEvent>.Create(
             eventType: "OrderStatusChanged",
             data: new OrderStatusChangedIntegrationEvent(
@@ -45,13 +51,15 @@ public class CancelOrderUseCase
                 previousStatus.ToString(),
                 order.Status.ToString(),
                 order.UpdatedAt ?? DateTimeOffset.UtcNow
-            )
+            ),
+            correlationId: correlationId
         );
         await _eventPublisher.PublishAsync(statusChangedEvent, "order.status.changed", cancellationToken);
 
         var cancelledEvent = EventEnvelope<OrderCancelledIntegrationEvent>.Create(
             eventType: "OrderCancelled",
-            data: new OrderCancelledIntegrationEvent(order.Id, previousStatus.ToString(), order.UpdatedAt ?? DateTimeOffset.UtcNow)
+            data: new OrderCancelledIntegrationEvent(order.Id, previousStatus.ToString(), order.UpdatedAt ?? DateTimeOffset.UtcNow),
+            correlationId: correlationId
         );
         await _eventPublisher.PublishAsync(cancelledEvent, "order.cancelled", cancellationToken);
 

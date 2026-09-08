@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using OrderFlow.Messaging.Contracts.Correlation;
 using OrderFlow.Messaging.Contracts.Events;
 using OrderFlow.Notifications.Application.UseCases;
 using OrderFlow.Notifications.Domain.Entities;
@@ -17,6 +18,7 @@ public class OrderEventsConsumer : IOrderEventsConsumer
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly RabbitMqOptions _options;
     private readonly ILogger<OrderEventsConsumer> _logger;
+    private readonly ICorrelationContextAccessor? _correlationContextAccessor;
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -28,12 +30,14 @@ public class OrderEventsConsumer : IOrderEventsConsumer
         IRabbitMqConnection connection,
         IServiceScopeFactory serviceScopeFactory,
         IOptions<RabbitMqOptions> options,
-        ILogger<OrderEventsConsumer> logger)
+        ILogger<OrderEventsConsumer> logger,
+        ICorrelationContextAccessor? correlationContextAccessor = null)
     {
         _connection = connection;
         _serviceScopeFactory = serviceScopeFactory;
         _options = options.Value;
         _logger = logger;
+        _correlationContextAccessor = correlationContextAccessor;
     }
 
     public async Task StartConsumingAsync(CancellationToken cancellationToken = default)
@@ -102,6 +106,24 @@ public class OrderEventsConsumer : IOrderEventsConsumer
         Guid? eventId = Guid.TryParse(messageId, out var parsedEventId) ? parsedEventId : null;
         Guid? orderId = null;
 
+        // Check AMQP headers if correlationId was not present on properties
+        if (string.IsNullOrWhiteSpace(correlationId) && properties.Headers != null)
+        {
+            if (properties.Headers.TryGetValue(CorrelationConstants.HeaderName, out var headerObj) ||
+                properties.Headers.TryGetValue(CorrelationConstants.PropertyName, out headerObj) ||
+                properties.Headers.TryGetValue("correlationId", out headerObj))
+            {
+                if (headerObj is byte[] headerBytes)
+                {
+                    correlationId = System.Text.Encoding.UTF8.GetString(headerBytes);
+                }
+                else if (headerObj != null)
+                {
+                    correlationId = headerObj.ToString();
+                }
+            }
+        }
+
         // 1. Validate & Parse JSON Payload Metadata
         try
         {
@@ -145,20 +167,39 @@ public class OrderEventsConsumer : IOrderEventsConsumer
         }
         catch (JsonException ex)
         {
+            var poisonCorrelationId = !string.IsNullOrWhiteSpace(correlationId) ? correlationId : "N/A";
+            using var poisonScope = _logger.BeginScope(new Dictionary<string, object>
+            {
+                [CorrelationConstants.PropertyName] = poisonCorrelationId
+            });
+
             _logger.LogError(
                 ex,
                 "Failed to parse JSON payload [DeliveryTag: {DeliveryTag}, EventId: {EventId}, CorrelationId: {CorrelationId}]. Forwarding directly to DLQ '{DlQueueName}' without retries.",
                 deliveryTag,
                 eventId?.ToString() ?? "N/A",
-                correlationId ?? "N/A",
+                poisonCorrelationId,
                 _options.DeadLetterQueueName);
 
             await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: false, cancellationToken);
             return;
         }
 
+        var resolvedCorrelationId = !string.IsNullOrWhiteSpace(correlationId)
+            ? correlationId
+            : Guid.NewGuid().ToString();
+
+        if (_correlationContextAccessor != null)
+        {
+            _correlationContextAccessor.CorrelationId = resolvedCorrelationId;
+        }
+
+        using var correlationLogScope = _logger.BeginScope(new Dictionary<string, object>
+        {
+            [CorrelationConstants.PropertyName] = resolvedCorrelationId
+        });
+
         var resolvedEventId = eventId?.ToString() ?? "N/A";
-        var resolvedCorrelationId = correlationId ?? "N/A";
         var resolvedOrderId = orderId.HasValue ? orderId.Value.ToString() : "N/A";
 
         // 2. Reject unidentifiable or unsupported events immediately to DLQ
@@ -208,6 +249,11 @@ public class OrderEventsConsumer : IOrderEventsConsumer
                     resolvedCorrelationId);
 
                 using var scope = _serviceScopeFactory.CreateScope();
+                var scopedAccessor = scope.ServiceProvider.GetService<ICorrelationContextAccessor>();
+                if (scopedAccessor != null)
+                {
+                    scopedAccessor.CorrelationId = resolvedCorrelationId;
+                }
                 var notification = await DispatchEventAsync(eventType, body, scope.ServiceProvider, cancellationToken);
 
                 if (notification == null)

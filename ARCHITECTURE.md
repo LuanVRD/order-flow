@@ -157,3 +157,23 @@ O consumidor `OrderEventsConsumer` adota uma política de resiliência ativa par
    - A mensagem **nunca** é confirmada (`BasicAckAsync`) antes de ser processada e persistida com sucesso (ou deduplicada via idempotência).
    - Não há possibilidade de perda silenciosa nem de loop infinito de reprocessamento.
 
+---
+
+### 4.4 Rastreabilidade Distribuída (Correlation ID)
+
+O fluxo de rastreabilidade ponta a ponta correlaciona qualquer requisição HTTP externa com a publicação e o consumo de eventos no broker:
+
+1. **Header HTTP (`X-Correlation-ID`)**:
+   - O `CorrelationIdMiddleware` no Orders API inspeciona o header `X-Correlation-ID`. Se ausente ou em branco, gera um novo identificador UUID.
+   - O identificador é inserido no cabeçalho da resposta HTTP (`X-Correlation-ID`) e associado ao `ICorrelationContextAccessor`.
+   - O middleware abre um escopo de log estruturado (`ILogger.BeginScope`) com a propriedade `CorrelationId`, garantindo que todos os logs gerados durante o request contenham o identificador.
+
+2. **Propagação para Mensageria**:
+   - Os Use Cases repassam o Correlation ID para o `EventEnvelope<T>`.
+   - O `RabbitMqEventPublisher` injeta o identificador na propriedade `BasicProperties.CorrelationId` e nos headers AMQP (`X-Correlation-ID`, `correlationId`), emitindo log estruturado com `[CorrelationId: {CorrelationId}]`.
+
+3. **Consumo e Escopo no Notifications Worker**:
+   - O `OrderEventsConsumer` recupera o `CorrelationId` das propriedades da mensagem, dos headers AMQP ou do payload do envelope JSON.
+   - Um escopo de log (`_logger.BeginScope`) é aberto com a chave `CorrelationId`, assegurando que todos os logs de consumo, retries, encaminhamento para DLQ e persistência de notificações compartilhem o mesmo identificador da requisição original.
+
+

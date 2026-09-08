@@ -72,4 +72,30 @@ public class CreateOrderUseCaseTests
         await _eventPublisher.DidNotReceive().PublishAsync(
             Arg.Any<EventEnvelope<OrderCreatedIntegrationEvent>>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task ExecuteAsync_WithCorrelationContext_ShouldPublishEnvelopeWithCorrelationId()
+    {
+        // Arrange
+        var correlationAccessor = Substitute.For<OrderFlow.Messaging.Contracts.Correlation.ICorrelationContextAccessor>();
+        correlationAccessor.CorrelationId.Returns("test-correlation-uuid-999");
+
+        var validator = new CreateOrderCommandValidator();
+        var useCase = new CreateOrderUseCase(_repository, _eventPublisher, validator, correlationAccessor);
+        var command = new CreateOrderCommand("Jane Doe", "jane.doe@example.com", 250.00m);
+
+        // Act
+        var result = await useCase.ExecuteAsync(command, CancellationToken.None);
+
+        // Assert
+        result.Should().NotBeNull();
+        await _eventPublisher.Received(1).PublishAsync(
+            Arg.Is<EventEnvelope<OrderCreatedIntegrationEvent>>(e =>
+                e.Data.OrderId == result.Id &&
+                e.CorrelationId == "test-correlation-uuid-999" &&
+                e.EventType == "OrderCreated"),
+            Arg.Is<string>(rk => rk == "order.created"),
+            Arg.Any<CancellationToken>()
+        );
+    }
 }
