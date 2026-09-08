@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OrderFlow.Notifications.Application.Interfaces;
+using OrderFlow.Notifications.Infrastructure.Messaging;
 using OrderFlow.Notifications.Infrastructure.Persistence;
 using OrderFlow.Notifications.Infrastructure.Persistence.Repositories;
 
@@ -13,6 +14,10 @@ public static class DependencyInjection
     {
         services.AddScoped<INotificationRepository, NotificationRepository>();
         services.AddScoped<IProcessedMessageRepository, ProcessedMessageRepository>();
+
+        services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
+        services.AddSingleton<IOrderEventsConsumer, OrderEventsConsumer>();
 
         if (services.Any(sd => sd.ServiceType == typeof(DbContextOptions<NotificationsDbContext>)))
         {
