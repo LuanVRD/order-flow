@@ -1,5 +1,7 @@
+using Microsoft.EntityFrameworkCore;
 using OrderFlow.Notifications.Application;
 using OrderFlow.Notifications.Infrastructure;
+using OrderFlow.Notifications.Infrastructure.Persistence;
 using OrderFlow.Notifications.Worker;
 using Serilog;
 using Serilog.Formatting.Compact;
@@ -33,5 +35,16 @@ builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();
+
+using (var scope = host.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<NotificationsDbContext>();
+    if (dbContext.Database.IsNpgsql())
+    {
+        await dbContext.Database.MigrateAsync();
+    }
+}
+
 host.Run();
+
 

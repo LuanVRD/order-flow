@@ -1,0 +1,122 @@
+services:
+  orders-db:
+    image: postgres:17-alpine
+    container_name: orders-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ORDERS_DB_NAME:-orderflow_orders}
+      POSTGRES_USER: ${ORDERS_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${ORDERS_DB_PASSWORD:-postgres}
+    ports:
+      - "${ORDERS_DB_PORT:-5433}:5432"
+    volumes:
+      - orders_db_data:/var/lib/postgresql/data
+    networks:
+      - orderflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ORDERS_DB_USER:-postgres} -d ${ORDERS_DB_NAME:-orderflow_orders}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  notifications-db:
+    image: postgres:17-alpine
+    container_name: notifications-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${NOTIFICATIONS_DB_NAME:-orderflow_notifications}
+      POSTGRES_USER: ${NOTIFICATIONS_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${NOTIFICATIONS_DB_PASSWORD:-postgres}
+    ports:
+      - "${NOTIFICATIONS_DB_PORT:-5434}:5432"
+    volumes:
+      - notifications_db_data:/var/lib/postgresql/data
+    networks:
+      - orderflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NOTIFICATIONS_DB_USER:-postgres} -d ${NOTIFICATIONS_DB_NAME:-orderflow_notifications}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - orderflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  orders-api:
+    build:
+      context: .
+      dockerfile: src/Services/Orders/OrderFlow.Orders.Api/Dockerfile
+    container_name: orders-api
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ConnectionStrings__DefaultConnection: Host=orders-db;Port=5432;Database=${ORDERS_DB_NAME:-orderflow_orders};Username=${ORDERS_DB_USER:-postgres};Password=${ORDERS_DB_PASSWORD:-postgres}
+      RabbitMQ__HostName: rabbitmq
+      RabbitMQ__Port: 5672
+      RabbitMQ__UserName: ${RABBITMQ_USER:-guest}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD:-guest}
+      Serilog__UseJsonConsole: ${SERILOG_USE_JSON_CONSOLE:-false}
+    ports:
+      - "${ORDERS_API_PORT:-5000}:8080"
+    networks:
+      - orderflow-network
+    depends_on:
+      orders-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  notifications-worker:
+    build:
+      context: .
+      dockerfile: src/Services/Notifications/OrderFlow.Notifications.Worker/Dockerfile
+    container_name: notifications-worker
+    restart: unless-stopped
+    environment:
+      DOTNET_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ConnectionStrings__NotificationsConnection: Host=notifications-db;Port=5432;Database=${NOTIFICATIONS_DB_NAME:-orderflow_notifications};Username=${NOTIFICATIONS_DB_USER:-postgres};Password=${NOTIFICATIONS_DB_PASSWORD:-postgres}
+      RabbitMQ__HostName: rabbitmq
+      RabbitMQ__Port: 5672
+      RabbitMQ__UserName: ${RABBITMQ_USER:-guest}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD:-guest}
+      Serilog__UseJsonConsole: ${SERILOG_USE_JSON_CONSOLE:-false}
+    networks:
+      - orderflow-network
+    depends_on:
+      notifications-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  orders_db_data:
+    name: orderflow_orders_db_data
+  notifications_db_data:
+    name: orderflow_notifications_db_data
+  rabbitmq_data:
+    name: orderflow_rabbitmq_data
+
+networks:
+  orderflow-network:
+    name: orderflow-network
+    driver: bridge

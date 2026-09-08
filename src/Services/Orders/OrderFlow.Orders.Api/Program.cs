@@ -1,8 +1,10 @@
 using System.Text.Json.Serialization;
+using Microsoft.EntityFrameworkCore;
 using OrderFlow.Messaging.Contracts.Correlation;
 using OrderFlow.Orders.Api.Middlewares;
 using OrderFlow.Orders.Application;
 using OrderFlow.Orders.Infrastructure;
+using OrderFlow.Orders.Infrastructure.Persistence;
 using Serilog;
 using Serilog.Formatting.Compact;
 
@@ -57,6 +59,15 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
 var app = builder.Build();
 
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();
+    if (dbContext.Database.IsNpgsql())
+    {
+        await dbContext.Database.MigrateAsync();
+    }
+}
+
 app.UseMiddleware<CorrelationIdMiddleware>();
 
 app.UseSerilogRequestLogging(options =>
@@ -90,4 +101,5 @@ app.MapControllers();
 app.Run();
 
 public partial class Program { }
+
 

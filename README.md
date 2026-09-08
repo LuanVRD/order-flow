@@ -47,6 +47,7 @@ OrderFlow/
 
 - **.NET 9 SDK** (C# 13)
 - **ASP.NET Core Web API**
+- **Docker & Docker Compose** (Containerização e orquestração local)
 - **Background Worker Service**
 - **Entity Framework Core**
 - **RabbitMQ** (Mensageria com Publisher/Subscriber e DLQ)
@@ -58,21 +59,51 @@ OrderFlow/
 ## 🚀 Como Executar
 
 ### Pré-requisitos
-- .NET 9 SDK instalado
+- **Docker** e **Docker Compose** instalados (ou .NET 9 SDK para execução local direta).
 
-### Compilação da Solução
+---
 
-Para restaurar dependências e compilar toda a solução:
+### 🐳 Execução Completa com Docker Compose (Recomendado)
+
+Para subir todo o ecossistema (Orders API, Notifications Worker, 2 bancos PostgreSQL isolados e RabbitMQ Management) de forma reproduzível:
+
+1. **Configurar variáveis de ambiente**:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Iniciar todos os serviços com build**:
+   ```bash
+   docker compose up --build -d
+   ```
+
+3. **Portas e Serviços Disponíveis**:
+   - 🌐 **Orders API (Swagger / OpenAPI)**: [http://localhost:5000/swagger](http://localhost:5000/swagger)
+   - 🐰 **RabbitMQ Management UI**: [http://localhost:15672](http://localhost:15672) (Credenciais: `guest` / `guest`)
+   - 🐘 **Orders Database (PostgreSQL)**: `localhost:5433` (Database: `orderflow_orders`, User: `postgres`, Password: `postgres`)
+   - 🐘 **Notifications Database (PostgreSQL)**: `localhost:5434` (Database: `orderflow_notifications`, User: `postgres`, Password: `postgres`)
+
+4. **Acompanhar os logs estruturados**:
+   ```bash
+   docker compose logs -f
+   ```
+
+5. **Parar e remover os containers e volumes**:
+   ```bash
+   docker compose down -v
+   ```
+
+---
+
+### 💻 Execução Local Direta (.NET CLI)
+
+Caso deseje compilar e rodar localmente sem containers:
 
 ```bash
+# Restaurar dependências e compilar a solução
 dotnet build OrderFlow.sln
-```
 
-### Execução dos Testes
-
-Para rodar todos os testes automatizados da solução:
-
-```bash
+# Executar todos os testes automatizados
 dotnet test OrderFlow.sln
 ```
 
