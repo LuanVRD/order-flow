@@ -36,17 +36,19 @@ public class CustomWebApplicationFactory : WebApplicationFactory<Program>
                 services.Remove(descriptor);
             }
 
-            services.AddDbContext<OrdersDbContext>(options =>
+            services.AddDbContext<OrdersDbContext>((sp, options) =>
             {
+                var interceptor = sp.GetRequiredService<OrderFlow.Orders.Infrastructure.Persistence.Interceptors.OutboxSaveChangesInterceptor>();
+                options.AddInterceptors(interceptor);
                 options.UseSqlite(_sqliteConnection);
             });
 
-            var publisherDescriptor = services.SingleOrDefault(d => d.ServiceType == typeof(OrderFlow.Orders.Application.Interfaces.IEventPublisher));
+            var publisherDescriptor = services.SingleOrDefault(d => d.ServiceType == typeof(OrderFlow.Orders.Infrastructure.Messaging.IEventPublisher));
             if (publisherDescriptor != null)
             {
                 services.Remove(publisherDescriptor);
             }
-            services.AddScoped<OrderFlow.Orders.Application.Interfaces.IEventPublisher, OrderFlow.Orders.Infrastructure.Messaging.LoggingEventPublisher>();
+            services.AddScoped<OrderFlow.Orders.Infrastructure.Messaging.IEventPublisher, OrderFlow.Orders.Infrastructure.Messaging.LoggingEventPublisher>();
 
             var sp = services.BuildServiceProvider();
             using var scope = sp.CreateScope();

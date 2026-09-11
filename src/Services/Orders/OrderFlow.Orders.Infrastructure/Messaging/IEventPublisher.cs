@@ -1,4 +1,4 @@
-namespace OrderFlow.Orders.Application.Interfaces;
+namespace OrderFlow.Orders.Infrastructure.Messaging;
 
 public interface IEventPublisher
 {

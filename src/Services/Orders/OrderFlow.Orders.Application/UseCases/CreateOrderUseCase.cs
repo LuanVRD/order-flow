@@ -1,6 +1,4 @@
 using FluentValidation;
-using OrderFlow.Messaging.Contracts.Correlation;
-using OrderFlow.Messaging.Contracts.Events;
 using OrderFlow.Orders.Application.DTOs;
 using OrderFlow.Orders.Application.Interfaces;
 using OrderFlow.Orders.Domain.Entities;
@@ -10,20 +8,14 @@ namespace OrderFlow.Orders.Application.UseCases;
 public class CreateOrderUseCase
 {
     private readonly IOrderRepository _repository;
-    private readonly IEventPublisher _eventPublisher;
     private readonly IValidator<CreateOrderCommand> _validator;
-    private readonly ICorrelationContextAccessor? _correlationContextAccessor;
 
     public CreateOrderUseCase(
         IOrderRepository repository,
-        IEventPublisher eventPublisher,
-        IValidator<CreateOrderCommand> validator,
-        ICorrelationContextAccessor? correlationContextAccessor = null)
+        IValidator<CreateOrderCommand> validator)
     {
         _repository = repository;
-        _eventPublisher = eventPublisher;
         _validator = validator;
-        _correlationContextAccessor = correlationContextAccessor;
     }
 
     public async Task<OrderResponse> ExecuteAsync(CreateOrderCommand command, CancellationToken cancellationToken = default)
@@ -34,22 +26,6 @@ public class CreateOrderUseCase
 
         await _repository.AddAsync(order, cancellationToken);
         await _repository.SaveChangesAsync(cancellationToken);
-
-        var integrationEvent = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
-            eventType: "OrderCreated",
-            data: new OrderCreatedIntegrationEvent(
-                order.Id,
-                order.CustomerName,
-                order.CustomerEmail,
-                order.TotalAmount,
-                order.Status.ToString(),
-                order.CreatedAt
-            ),
-            correlationId: _correlationContextAccessor?.CorrelationId
-        );
-
-        await _eventPublisher.PublishAsync(integrationEvent, "order.created", cancellationToken);
-        order.ClearDomainEvents();
 
         return OrderResponse.FromEntity(order);
     }

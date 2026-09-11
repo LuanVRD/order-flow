@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -20,19 +21,25 @@ using OrderFlow.Notifications.Infrastructure.Persistence;
 using OrderFlow.Notifications.Infrastructure.Persistence.Repositories;
 using OrderFlow.Orders.Api.Models.Requests;
 using OrderFlow.Orders.Application.DTOs;
-using OrderFlow.Orders.Application.Interfaces;
+using OrderFlow.Orders.Infrastructure.Messaging;
+using OrderFlow.Orders.Infrastructure.Outbox;
 using OrderFlow.Orders.Infrastructure.Persistence;
+using OrderFlow.Orders.Infrastructure.Persistence.Interceptors;
 using RabbitMQ.Client;
 
 namespace OrderFlow.Orders.IntegrationTests.Tracing;
 
 public class CapturingEventPublisher : IEventPublisher
 {
+    private readonly object _lock = new();
     public List<(object Message, string RoutingKey)> PublishedMessages { get; } = new();
 
     public Task PublishAsync<T>(T message, string routingKey, CancellationToken cancellationToken = default) where T : class
     {
-        PublishedMessages.Add((message, routingKey));
+        lock (_lock)
+        {
+            PublishedMessages.Add((message, routingKey));
+        }
         return Task.CompletedTask;
     }
 }
@@ -60,8 +67,10 @@ public class TracingWebApplicationFactory : WebApplicationFactory<Program>
                 services.Remove(descriptor);
             }
 
-            services.AddDbContext<OrdersDbContext>(options =>
+            services.AddDbContext<OrdersDbContext>((sp, options) =>
             {
+                var interceptor = sp.GetRequiredService<OutboxSaveChangesInterceptor>();
+                options.AddInterceptors(interceptor);
                 options.UseSqlite(_sqliteConnection);
             });
 
@@ -77,6 +86,30 @@ public class TracingWebApplicationFactory : WebApplicationFactory<Program>
             var db = scope.ServiceProvider.GetRequiredService<OrdersDbContext>();
             db.Database.EnsureCreated();
         });
+    }
+
+    public async Task ProcessOutboxMessagesAsync()
+    {
+        using var scope = Services.CreateScope();
+        var processor = scope.ServiceProvider.GetServices<IHostedService>()
+            .OfType<OutboxProcessorBackgroundService>()
+            .FirstOrDefault();
+        if (processor != null)
+        {
+            await processor.ProcessPendingBatchAsync(CancellationToken.None);
+        }
+
+        for (int i = 0; i < 20; i++)
+        {
+            lock (EventPublisher)
+            {
+                if (EventPublisher.PublishedMessages.Count > 0)
+                {
+                    break;
+                }
+            }
+            await Task.Delay(50);
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -178,10 +211,13 @@ public class EndToEndDistributedTracingTests : IClassFixture<TracingWebApplicati
         orderResponse.Should().NotBeNull();
         orderResponse!.Id.Should().NotBeEmpty();
 
+        // Process Outbox to trigger publication
+        await _factory.ProcessOutboxMessagesAsync();
+
         // 4. Assert: Event published to RabbitMQ contains the exact same Correlation ID
         _factory.EventPublisher.PublishedMessages.Should().NotBeEmpty();
         var publishedItem = _factory.EventPublisher.PublishedMessages
-            .Last(m => m.Message is EventEnvelope<OrderCreatedIntegrationEvent>);
+            .Last(m => m.Message is EventEnvelope<OrderCreatedIntegrationEvent> env && env.Data.OrderId == orderResponse.Id);
 
         var envelope = (EventEnvelope<OrderCreatedIntegrationEvent>)publishedItem.Message;
         envelope.CorrelationId.Should().Be(clientCorrelationId);
@@ -236,9 +272,12 @@ public class EndToEndDistributedTracingTests : IClassFixture<TracingWebApplicati
         var orderResponse = await response.Content.ReadFromJsonAsync<OrderResponse>(_jsonOptions);
         orderResponse.Should().NotBeNull();
 
+        // Process Outbox to trigger publication
+        await _factory.ProcessOutboxMessagesAsync();
+
         // 4. Assert: Event published contains the generated Correlation ID
         var publishedItem = _factory.EventPublisher.PublishedMessages
-            .Last(m => m.Message is EventEnvelope<OrderCreatedIntegrationEvent>);
+            .Last(m => m.Message is EventEnvelope<OrderCreatedIntegrationEvent> env && env.Data.OrderId == orderResponse!.Id);
 
         var envelope = (EventEnvelope<OrderCreatedIntegrationEvent>)publishedItem.Message;
         envelope.CorrelationId.Should().Be(generatedCorrelationId);

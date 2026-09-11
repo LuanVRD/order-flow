@@ -2,7 +2,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\OrderFlow.Orders.Domain\OrderFlow.Orders.Domain.csproj" />
-    <ProjectReference Include="..\..\..\BuildingBlocks\OrderFlow.Messaging.Contracts\OrderFlow.Messaging.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -3,7 +3,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OrderFlow.Orders.Application.Interfaces;
 using OrderFlow.Orders.Infrastructure.Messaging;
+using OrderFlow.Orders.Infrastructure.Outbox;
 using OrderFlow.Orders.Infrastructure.Persistence;
+using OrderFlow.Orders.Infrastructure.Persistence.Interceptors;
 using OrderFlow.Orders.Infrastructure.Persistence.Repositories;
 
 namespace OrderFlow.Orders.Infrastructure;
@@ -13,11 +15,16 @@ public static class DependencyInjection
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<IOrderRepository, OrderRepository>();
+        services.AddScoped<IOutboxRepository, OutboxRepository>();
+        services.AddScoped<OutboxSaveChangesInterceptor>();
 
         services.AddSingleton<OrderFlow.Messaging.Contracts.Correlation.ICorrelationContextAccessor, OrderFlow.Messaging.Contracts.Correlation.CorrelationContextAccessor>();
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.Configure<OutboxOptions>(configuration.GetSection(OutboxOptions.SectionName));
         services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
         services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
+
+        services.AddHostedService<OutboxProcessorBackgroundService>();
 
         if (services.Any(sd => sd.ServiceType == typeof(DbContextOptions<OrdersDbContext>)))
         {
@@ -36,13 +43,21 @@ public static class DependencyInjection
             connectionString.Contains("Data Source=", StringComparison.OrdinalIgnoreCase) ||
             connectionString.EndsWith(".db", StringComparison.OrdinalIgnoreCase))
         {
-            services.AddDbContext<OrdersDbContext>(options =>
-                options.UseSqlite(connectionString));
+            services.AddDbContext<OrdersDbContext>((sp, options) =>
+            {
+                var interceptor = sp.GetRequiredService<OutboxSaveChangesInterceptor>();
+                options.AddInterceptors(interceptor);
+                options.UseSqlite(connectionString);
+            });
         }
         else
         {
-            services.AddDbContext<OrdersDbContext>(options =>
-                options.UseNpgsql(connectionString));
+            services.AddDbContext<OrdersDbContext>((sp, options) =>
+            {
+                var interceptor = sp.GetRequiredService<OutboxSaveChangesInterceptor>();
+                options.AddInterceptors(interceptor);
+                options.UseNpgsql(connectionString);
+            });
         }
 
         return services;

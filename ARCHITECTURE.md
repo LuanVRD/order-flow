@@ -33,13 +33,8 @@ A direção das dependências no projeto respeita rigorosamente a regra das cama
 
 ### 2.1 Orders Service
 - **Responsabilidade**: Gerenciar o ciclo de vida dos pedidos (`Pending` -> `Processing` -> `Completed` ou `Cancelled`).
-- **Persistência**: Banco isolado `orderflow_orders` no PostgreSQL.
-- **Mensageria**: Publica eventos de integração (`OrderCreated`, `OrderStatusChanged`, `OrderCompleted`, `OrderCancelled`) no RabbitMQ após mudanças de estado.
-
-### 2.2 Notifications Service
-- **Responsabilidade**: Consumir eventos publicados pelo *Orders Service*, converter em notificações auditáveis e garantir idempotência.
-- **Persistência**: Banco isolado `orderflow_notifications` no PostgreSQL (tabelas `Notifications` e `ProcessedMessages`).
-- **Mensageria**: Consome da fila `orderflow.notifications` com suporte a políticas de retry e Dead Letter Queue (DLQ).
+- **Persistência**: Banco isolado `orderflow_orders` no PostgreSQL (tabelas `Orders` e `OutboxMessages`).
+- **Mensageria**: Emite eventos de domínio convertidos atomicamente no commit relacional para eventos de integração (`OrderCreated`, `OrderStatusChanged`, `OrderCompleted`, `OrderCancelled`) e publicados assincronamente no RabbitMQ via `OutboxProcessorBackgroundService`.
 
 ---
 
@@ -96,13 +91,13 @@ Para garantir interoperabilidade e rastreabilidade entre microsserviços sem com
 
 ### 3.4 Topologia RabbitMQ no Orders Service
 
-O microsserviço de Orders publica eventos através da implementação `RabbitMqEventPublisher` (na camada `OrderFlow.Orders.Infrastructure`), atendendo à abstração `IEventPublisher` da camada Application.
+O microsserviço de Orders publica eventos através do processador em segundo plano (`OutboxProcessorBackgroundService`) utilizando a implementação `RabbitMqEventPublisher`, atendendo à abstração `IEventPublisher`.
 
 - **Exchange**: `orderflow.orders`
   - **Tipo**: `topic`
   - **Durabilidade**: `durable: true`, `autoDelete: false`
 - **Routing Keys**:
-  - `order.created`: Publicado imediatamente após a criação do pedido ser persistida com sucesso.
+  - `order.created`: Publicado após confirmação de criação do pedido no Outbox.
   - `order.status.changed`: Publicado a cada transição de status do pedido.
   - `order.completed`: Publicado quando o pedido atinge o estado final `Completed`.
   - `order.cancelled`: Publicado quando o pedido é cancelado (`Cancelled`).
@@ -117,21 +112,70 @@ O microsserviço de Orders publica eventos através da implementação `RabbitMq
 
 ---
 
-## 4. Padrões Distribuídos e Limitações Técnicas
+## 4. Padrões Distribuídos e Resiliência
 
-### 4.1 Limitação Técnica: Ausência de Transactional Outbox (Dual-Write Problem)
+### 4.1 Transactional Outbox Pattern (Eliminação do Dual-Write Problem)
 
-> [!WARNING]
-> **Limitação Técnica Atual**: O microsserviço de Orders publica mensagens no RabbitMQ de forma síncrona diretamente nos casos de uso após a persistência no banco de dados (`SaveChangesAsync`).
-> 
-> **Impacto Arquitetural**:
-> 1. **Dual-Write Problem**: Como a escrita no PostgreSQL e a publicação no RabbitMQ não compartilham uma transação atômica distribuída (2PC / XA), há um ponto de falha onde o pedido pode ser gravado com sucesso no banco, mas a publicação no broker falhar (ex.: indisponibilidade transitória de rede, reinício do broker).
-> 2. **Semântica de Entrega**: Atualmente opera em regime de *melhor esforço* (*at-most-once* para publicação), o que pode acarretar em mensagens perdidas em caso de indisponibilidade no momento do disparo.
-> 
-> **Evolução Arquitetural Planejada**:
-> Em etapas subsequentes de maturidade da plataforma, essa limitação será mitigada com a implementação do **Transactional Outbox Pattern**:
-> - O caso de uso gravará o agregado `Order` e o registro do evento na tabela `OutboxMessages` dentro da **mesma transação relacional local** do PostgreSQL.
-> - Um processo em background (*BackgroundService* / Worker ou CDC com Debezium) fará o pooling/polling e a publicação garantida no RabbitMQ com confirmações (*publisher confirms*), assegurando semântica *at-least-once* ponta a ponta.
+Para eliminar por completo a janela de inconsistência (*Dual-Write Problem*) entre a gravação do pedido e a publicação de mensagens no broker, o **Orders Service** adota o **Transactional Outbox Pattern**:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Cliente / Frontend
+    participant API as Orders API
+    participant DB as PostgreSQL (orderflow_orders)
+    participant Worker as Outbox Processor (BackgroundService)
+    participant Rabbit as RabbitMQ (orderflow.orders)
+    participant Consumer as Notifications Worker
+
+    Client->>API: POST /api/orders
+    Note over API: Executa regra de negócio e gera Domain Event
+    API->>DB: Inicia Transação Relacional Local
+    API->>DB: INSERT INTO "Orders"
+    API->>DB: INSERT INTO "OutboxMessages" (EventEnvelope JSON)
+    API->>DB: COMMIT (Transação Atômica)
+    API-->>Client: 201 Created (Pedido salvo com sucesso)
+
+    loop Polling em Lote com Lock Distribuído
+        Worker->>DB: SELECT & Lock de mensagens pendentes (Lease)
+        Worker->>Rabbit: BasicPublishAsync (Exchange orderflow.orders)
+        alt Broker Confirma Publicação
+            Worker->>DB: UPDATE "OutboxMessages" SET ProcessedAt = now()
+            Rabbit->>Consumer: Entrega mensagem na fila
+        else Falha Transitória / Broker Indisponível
+            Worker->>DB: UPDATE "OutboxMessages" SET RetryCount++, NextRetryAtUtc = backoff + jitter
+            Note over Worker: Mensagem retida no PostgreSQL para retry posterior
+        end
+    end
+```
+
+#### 1. Persistência Relacional Atômica (`OutboxSaveChangesInterceptor`)
+- Os casos de uso (`CreateOrderUseCase`, `ChangeOrderStatusUseCase`, `CancelOrderUseCase`) não possuem dependência de broker de mensageria nem realizam chamadas de rede externas.
+- As mudanças de estado geram `IDomainEvent` (`OrderCreatedDomainEvent`, `OrderStatusChangedDomainEvent`, `OrderCompletedDomainEvent`, `OrderCancelledDomainEvent`).
+- O `OutboxSaveChangesInterceptor` intercepta a chamada de `SaveChangesAsync`, serializa os eventos em `EventEnvelope<T>` preservando o `CorrelationId` distribuído, insere as entidades `OutboxMessage` no mesmo contexto e limpa os eventos do agregado.
+- A persistência do agregado `Order` e os registros na tabela `OutboxMessages` ocorrem dentro da **mesma transação relacional local (ACID)** no PostgreSQL. Se o banco falhar, nada é gravado; se for bem-sucedido, o registro do evento está permanentemente seguro no disco.
+
+#### 2. Processador em Segundo Plano (`OutboxProcessorBackgroundService`)
+- Um `BackgroundService` dedicado executa pooling contínuo em lotes configuráveis (`OutboxOptions.BatchSize`).
+- **Garantia de Entrega At-Least-Once**: Uma mensagem só é marcada como processada (`ProcessedAt != null`) **estritamente após** a confirmação bem-sucedida de publicação no RabbitMQ.
+- Se o broker RabbitMQ estiver offline ou inacessível no momento da criação do pedido, a requisição HTTP do cliente responde normalmente com `201 Created`, os eventos permanecem armazenados no PostgreSQL e são automaticamente drenados e publicados assim que a conexão com o broker for restabelecida.
+
+#### 3. Concorrência e Locking Distribuído Multi-Instância
+- Para permitir múltiplas réplicas do Orders Service em execução simultânea sem processamento duplicado de lotes, o repositório (`OutboxRepository`) utiliza leasing atômico:
+- Cada worker adquire um lock temporário (`LockId` e `LockedUntilUtc = now + LockDuration`) via comando atômico no banco.
+- Instâncias concorrentes só conseguem recuperar registros onde `ProcessedAt IS NULL AND (LockedUntilUtc IS NULL OR LockedUntilUtc < now) AND (NextRetryAtUtc IS NULL OR NextRetryAtUtc <= now)`.
+
+#### 4. Política de Retry com Backoff Exponencial e Jitter
+- Em caso de falhas transitórias durante a publicação (ex.: timeout de conexão com broker, network partition), o worker:
+  - Incrementa o contador de tentativas (`RetryCount`).
+  - Registra a descrição do erro no campo `LastError`.
+  - Calcula a próxima janela de execução (`NextRetryAtUtc`) com backoff exponencial e jitter aleatório:
+    $$\text{Delay} = \min(\text{MaxDelay}, \text{BaseDelay} \times 2^{\text{RetryCount}}) + \text{RandomJitter}(0..1000\text{ms})$$
+  - Libera o lock (`LockedUntilUtc = null`) para permitir novas tentativas na próxima janela.
+
+#### 5. Política de Retenção e Limpeza Periódica (*Retention Cleanup*)
+- Para evitar crescimento ilimitado da tabela `OutboxMessages`, uma rotina de manutenção periódica (`PurgeProcessedMessagesAsync`) purga registros já processados cuja data de confirmação seja anterior ao período de retenção configurado (`OutboxOptions.RetentionDays = 7 dias`).
+- Mensagens não processadas (`ProcessedAt == null`) **nunca** são removidas, garantindo integridade e rastreabilidade total.
 
 ### 4.2 Idempotência e Deduplicação Atômica (Inbox Pattern)
 

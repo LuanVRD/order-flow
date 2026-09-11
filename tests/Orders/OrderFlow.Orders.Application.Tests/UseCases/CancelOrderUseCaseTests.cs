@@ -1,7 +1,6 @@
 using FluentAssertions;
 using FluentValidation;
 using NSubstitute;
-using OrderFlow.Messaging.Contracts.Events;
 using OrderFlow.Orders.Application.DTOs;
 using OrderFlow.Orders.Application.Exceptions;
 using OrderFlow.Orders.Application.Interfaces;
@@ -9,6 +8,7 @@ using OrderFlow.Orders.Application.UseCases;
 using OrderFlow.Orders.Application.Validators;
 using OrderFlow.Orders.Domain.Entities;
 using OrderFlow.Orders.Domain.Enums;
+using OrderFlow.Orders.Domain.Events;
 using OrderFlow.Orders.Domain.Exceptions;
 
 namespace OrderFlow.Orders.Application.Tests.UseCases;
@@ -16,19 +16,17 @@ namespace OrderFlow.Orders.Application.Tests.UseCases;
 public class CancelOrderUseCaseTests
 {
     private readonly IOrderRepository _repository;
-    private readonly IEventPublisher _eventPublisher;
     private readonly CancelOrderUseCase _useCase;
 
     public CancelOrderUseCaseTests()
     {
         _repository = Substitute.For<IOrderRepository>();
-        _eventPublisher = Substitute.For<IEventPublisher>();
         var validator = new CancelOrderCommandValidator();
-        _useCase = new CancelOrderUseCase(_repository, _eventPublisher, validator);
+        _useCase = new CancelOrderUseCase(_repository, validator);
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithPendingOrder_ShouldCancelOrderSaveAndPublishEvents()
+    public async Task ExecuteAsync_WithPendingOrder_ShouldCancelOrderSaveAndEmitDomainEvents()
     {
         // Arrange
         var order = new Order("Bob", "bob@example.com", 300m);
@@ -41,21 +39,12 @@ public class CancelOrderUseCaseTests
         // Assert
         result.Status.Should().Be(OrderStatus.Cancelled);
         await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
-
-        await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderStatusChangedIntegrationEvent>>(e => e.Data.NewStatus == "Cancelled"),
-            Arg.Is<string>(rk => rk == "order.status.changed"),
-            Arg.Any<CancellationToken>()
-        );
-        await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderCancelledIntegrationEvent>>(e => e.Data.OrderId == order.Id && e.Data.PreviousStatus == "Pending"),
-            Arg.Is<string>(rk => rk == "order.cancelled"),
-            Arg.Any<CancellationToken>()
-        );
+        order.DomainEvents.Should().Contain(e => e is OrderStatusChangedDomainEvent);
+        order.DomainEvents.Should().Contain(e => e is OrderCancelledDomainEvent);
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithProcessingOrder_ShouldCancelOrderSaveAndPublishEvents()
+    public async Task ExecuteAsync_WithProcessingOrder_ShouldCancelOrderSaveAndEmitDomainEvents()
     {
         // Arrange
         var order = new Order("Bob", "bob@example.com", 300m);
@@ -69,17 +58,8 @@ public class CancelOrderUseCaseTests
         // Assert
         result.Status.Should().Be(OrderStatus.Cancelled);
         await _repository.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
-
-        await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderStatusChangedIntegrationEvent>>(e => e.Data.NewStatus == "Cancelled"),
-            Arg.Is<string>(rk => rk == "order.status.changed"),
-            Arg.Any<CancellationToken>()
-        );
-        await _eventPublisher.Received(1).PublishAsync(
-            Arg.Is<EventEnvelope<OrderCancelledIntegrationEvent>>(e => e.Data.OrderId == order.Id && e.Data.PreviousStatus == "Processing"),
-            Arg.Is<string>(rk => rk == "order.cancelled"),
-            Arg.Any<CancellationToken>()
-        );
+        order.DomainEvents.Should().Contain(e => e is OrderStatusChangedDomainEvent);
+        order.DomainEvents.Should().Contain(e => e is OrderCancelledDomainEvent);
     }
 
     [Fact]
