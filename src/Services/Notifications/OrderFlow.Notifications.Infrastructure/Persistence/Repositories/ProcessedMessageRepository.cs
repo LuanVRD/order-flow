@@ -24,6 +24,5 @@ public class ProcessedMessageRepository : IProcessedMessageRepository
         ArgumentNullException.ThrowIfNull(processedMessage);
 
         await _context.ProcessedMessages.AddAsync(processedMessage, cancellationToken);
-        await _context.SaveChangesAsync(cancellationToken);
     }
 }

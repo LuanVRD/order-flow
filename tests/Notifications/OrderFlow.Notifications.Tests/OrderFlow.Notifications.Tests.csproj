@@ -16,6 +16,8 @@
     <PackageReference Include="NSubstitute" Version="5.3.0" />
     <PackageReference Include="FluentAssertions" Version="8.0.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.2" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,7 +28,6 @@
     <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Application\OrderFlow.Notifications.Application.csproj" />
     <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Domain\OrderFlow.Notifications.Domain.csproj" />
     <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Infrastructure\OrderFlow.Notifications.Infrastructure.csproj" />
-    <ProjectReference Include="..\..\..\src\Services\Notifications\OrderFlow.Notifications.Worker\OrderFlow.Notifications.Worker.csproj" />
   </ItemGroup>
 
 </Project>

@@ -50,6 +50,7 @@ public class ProcessedMessageRepositoryTests : IDisposable
 
         // Act
         await repository.AddAsync(processedMessage);
+        await context.SaveChangesAsync();
 
         // Assert
         await using var verifyContext = new NotificationsDbContext(_dbContextOptions);
@@ -65,7 +66,7 @@ public class ProcessedMessageRepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task AddAsync_ShouldThrowException_WhenDuplicateEventIdIsInserted()
+    public async Task AddAsync_ShouldThrowException_WhenDuplicateEventIdIsInsertedAndCommitted()
     {
         // Arrange
         var eventId = Guid.NewGuid();
@@ -76,13 +77,15 @@ public class ProcessedMessageRepositoryTests : IDisposable
         {
             var repo = new ProcessedMessageRepository(seedContext);
             await repo.AddAsync(first);
+            await seedContext.SaveChangesAsync();
         }
 
-        // Act & Assert (DB primary key / unique constraint prevents duplicate EventId)
+        // Act & Assert (DB primary key / unique constraint prevents duplicate EventId on commit)
         await using (var duplicateContext = new NotificationsDbContext(_dbContextOptions))
         {
             var repo = new ProcessedMessageRepository(duplicateContext);
-            await Assert.ThrowsAnyAsync<DbUpdateException>(() => repo.AddAsync(duplicate));
+            await repo.AddAsync(duplicate);
+            await Assert.ThrowsAnyAsync<DbUpdateException>(() => duplicateContext.SaveChangesAsync());
         }
     }
 

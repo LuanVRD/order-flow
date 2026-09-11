@@ -139,10 +139,10 @@ src/Services/Orders/
    Falhas transitórias (indisponibilidade temporária de banco, concorrência ou timeout de rede) acionam até **3 tentativas de processamento** com atraso incremental ($500\text{ms} \times 2^{\text{tentativa}-1}$).
 2. **Tratamento Imediato de Poison Messages**:
    Mensagens com payload corrompido (JSON inválido, campos obrigatórios ausentes, `EventType` não suportado) são rejeitadas imediatamente com `BasicNack(requeue: false)`, indo direto para a DLQ sem desperdiçar ciclos de retry.
-3. **Processamento Idempotente**:
-   O worker consulta a tabela `ProcessedMessages` no banco de notificações. Se o `EventId` recebido no envelope já tiver sido processado com sucesso, a mensagem recebe `BasicAck` imediatamente e a notificação não é duplicada.
-4. **Confirmação Estrita (Manual Acknowledgment)**:
-   Nenhuma mensagem é confirmada automaticamente. O `BasicAck` só é enviado após a persistência segura no banco de dados.
+3. **Processamento Idempotente Atômico (Inbox Pattern)**:
+   A gravação da entidade `Notification` e o registro de deduplicação `ProcessedMessage` ocorrem sob a mesma unidade de trabalho (`IUnitOfWork`) e um **único commit transacional** no PostgreSQL. Entregas concorrentes ou retransmissões com o mesmo `EventId` colidem na chave primária da tabela, sendo tratadas de forma idempotente com retorno seguro e emissão de `BasicAck` sem encaminhamento indevido para DLQ.
+4. **Confirmação Estrita (Manual Acknowledgment pós-commit)**:
+   Nenhuma mensagem é confirmada automaticamente. O `BasicAck` só é enviado após a confirmação transacional do commit no banco de dados (ou após a absorção de duplicidade). Falhas no commit não geram confirmação, permitindo retentativas resilientes.
 
 ---
 

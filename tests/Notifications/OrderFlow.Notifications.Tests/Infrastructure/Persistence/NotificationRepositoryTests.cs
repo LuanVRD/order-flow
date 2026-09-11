@@ -37,6 +37,7 @@ public class NotificationRepositoryTests : IDisposable
 
         // Act
         await repository.AddAsync(notification);
+        await context.SaveChangesAsync();
 
         // Assert
         await using var verifyContext = new NotificationsDbContext(_dbContextOptions);

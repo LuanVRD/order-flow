@@ -37,6 +37,7 @@ public class OrderEventsConsumerEndToEndTests : IDisposable
 
         services.AddScoped<OrderFlow.Notifications.Application.Interfaces.INotificationRepository, NotificationRepository>();
         services.AddScoped<OrderFlow.Notifications.Application.Interfaces.IProcessedMessageRepository, ProcessedMessageRepository>();
+        services.AddScoped<OrderFlow.Notifications.Application.Interfaces.IUnitOfWork, UnitOfWork>();
 
         var options = new RabbitMqOptions
         {

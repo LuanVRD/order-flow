@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using OrderFlow.Messaging.Contracts.Events;
+using OrderFlow.Notifications.Application.UseCases;
 using OrderFlow.Notifications.Domain.Entities;
 using OrderFlow.Notifications.Domain.Enums;
 using OrderFlow.Notifications.Infrastructure.Persistence;
@@ -101,6 +103,7 @@ public class PostgreSqlNotificationPersistenceTests : IAsyncLifetime
             Assert.False(existsBefore);
 
             await repository.AddAsync(processedMessage);
+            await context.SaveChangesAsync();
         }
 
         // Act & Assert 1 - Verificar existência no banco
@@ -111,12 +114,168 @@ public class PostgreSqlNotificationPersistenceTests : IAsyncLifetime
             Assert.True(existsAfter);
         }
 
-        // Act & Assert 2 - Tentativa de inserção duplicada deve violar a restrição de unicidade/PK no PostgreSQL
+        // Act & Assert 2 - Tentativa de inserção duplicada deve violar a restrição de unicidade/PK no PostgreSQL no commit
         await using (var duplicateContext = new NotificationsDbContext(_dbContextOptions))
         {
             var repository = new ProcessedMessageRepository(duplicateContext);
             var duplicate = new ProcessedMessage(eventId, "OrderCreatedIntegrationEvent");
-            await Assert.ThrowsAnyAsync<DbUpdateException>(() => repository.AddAsync(duplicate));
+            await repository.AddAsync(duplicate);
+            await Assert.ThrowsAnyAsync<DbUpdateException>(() => duplicateContext.SaveChangesAsync());
         }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenFailureOccursBeforeCommit_ShouldNotPersistAnyNotificationOrProcessedMessage()
+    {
+        // Arrange
+        var orderId = Guid.NewGuid();
+        var eventId = Guid.NewGuid();
+        var payload = new OrderCreatedIntegrationEvent(
+            orderId,
+            "Failed Commit User",
+            "fail@example.com",
+            120m,
+            "Pending",
+            DateTimeOffset.UtcNow);
+
+        var envelope = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
+            eventType: "OrderCreated",
+            data: payload,
+            eventId: eventId);
+
+        // Act: Simular falha adicionando ao DbContext mas abortando/falhando antes de CommitAsync
+        await using (var context = new NotificationsDbContext(_dbContextOptions))
+        {
+            var notifRepo = new NotificationRepository(context);
+            var procRepo = new ProcessedMessageRepository(context);
+
+            var notification = new Notification(orderId, NotificationType.OrderCreated, "Mensagem de teste");
+            var processedMessage = new ProcessedMessage(eventId, "OrderCreated");
+
+            await notifRepo.AddAsync(notification);
+            await procRepo.AddAsync(processedMessage);
+
+            // Simula crash / abort / cancelamento sem chamar SaveChangesAsync
+        }
+
+        // Assert: Nenhuma entidade deve ter sido persistida no PostgreSQL
+        await using (var verifyContext = new NotificationsDbContext(_dbContextOptions))
+        {
+            var persistedNotification = await verifyContext.Notifications.FirstOrDefaultAsync(n => n.OrderId == orderId);
+            var persistedMessage = await verifyContext.ProcessedMessages.FirstOrDefaultAsync(p => p.EventId == eventId);
+
+            Assert.Null(persistedNotification);
+            Assert.Null(persistedMessage);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenConcurrentExecutionsWithSameEventId_ShouldPersistExactlyOneNotificationAndOneProcessedMessage()
+    {
+        // Arrange
+        var orderId = Guid.NewGuid();
+        var eventId = Guid.NewGuid();
+        var payload = new OrderCreatedIntegrationEvent(
+            orderId,
+            "Concurrent User",
+            "concurrent@example.com",
+            300m,
+            "Pending",
+            DateTimeOffset.UtcNow);
+
+        var envelope = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
+            eventType: "OrderCreated",
+            data: payload,
+            eventId: eventId);
+
+        // Duas instâncias de DbContext e UseCase simulando duas instâncias de worker / threads consumindo o mesmo evento concorrentemente
+        await using var context1 = new NotificationsDbContext(_dbContextOptions);
+        await using var context2 = new NotificationsDbContext(_dbContextOptions);
+
+        var useCase1 = new ProcessOrderCreatedEventUseCase(
+            new NotificationRepository(context1),
+            new ProcessedMessageRepository(context1),
+            new UnitOfWork(context1));
+
+        var useCase2 = new ProcessOrderCreatedEventUseCase(
+            new NotificationRepository(context2),
+            new ProcessedMessageRepository(context2),
+            new UnitOfWork(context2));
+
+        // Act: Executar simultaneamente
+        var task1 = Task.Run(() => useCase1.ExecuteAsync(envelope));
+        var task2 = Task.Run(() => useCase2.ExecuteAsync(envelope));
+
+        var results = await Task.WhenAll(task1, task2);
+
+        // Assert:
+        // Exatamente um resultado deve ser a notificação criada, e o outro deve ser null (absorvido como duplicado)
+        var nonNullResults = results.Where(r => r != null).ToList();
+        var nullResults = results.Where(r => r == null).ToList();
+
+        Assert.Single(nonNullResults);
+        Assert.Single(nullResults);
+        Assert.Equal(orderId, nonNullResults[0]!.OrderId);
+
+        // Verificar banco PostgreSQL: exatamente 1 notificação e 1 ProcessedMessage
+        await using var verifyContext = new NotificationsDbContext(_dbContextOptions);
+        var persistedNotifications = await verifyContext.Notifications.Where(n => n.OrderId == orderId).ToListAsync();
+        var persistedMessages = await verifyContext.ProcessedMessages.Where(p => p.EventId == eventId).ToListAsync();
+
+        Assert.Single(persistedNotifications);
+        Assert.Single(persistedMessages);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenSequentialDuplicateEventReceived_ShouldReturnNullAndNotDuplicateNotification()
+    {
+        // Arrange
+        var orderId = Guid.NewGuid();
+        var eventId = Guid.NewGuid();
+        var payload = new OrderCreatedIntegrationEvent(
+            orderId,
+            "Sequential Duplicate User",
+            "seq@example.com",
+            450m,
+            "Pending",
+            DateTimeOffset.UtcNow);
+
+        var envelope = EventEnvelope<OrderCreatedIntegrationEvent>.Create(
+            eventType: "OrderCreated",
+            data: payload,
+            eventId: eventId);
+
+        // 1ª Execução: Primeira entrega
+        await using (var context1 = new NotificationsDbContext(_dbContextOptions))
+        {
+            var useCase = new ProcessOrderCreatedEventUseCase(
+                new NotificationRepository(context1),
+                new ProcessedMessageRepository(context1),
+                new UnitOfWork(context1));
+
+            var result1 = await useCase.ExecuteAsync(envelope);
+            Assert.NotNull(result1);
+            Assert.Equal(orderId, result1.OrderId);
+        }
+
+        // 2ª Execução: Reentrega da mesma mensagem
+        await using (var context2 = new NotificationsDbContext(_dbContextOptions))
+        {
+            var useCase = new ProcessOrderCreatedEventUseCase(
+                new NotificationRepository(context2),
+                new ProcessedMessageRepository(context2),
+                new UnitOfWork(context2));
+
+            var result2 = await useCase.ExecuteAsync(envelope);
+            Assert.Null(result2);
+        }
+
+        // Assert: Apenas 1 registro no PostgreSQL
+        await using var verifyContext = new NotificationsDbContext(_dbContextOptions);
+        var totalNotifications = await verifyContext.Notifications.CountAsync(n => n.OrderId == orderId);
+        var totalProcessed = await verifyContext.ProcessedMessages.CountAsync(p => p.EventId == eventId);
+
+        Assert.Equal(1, totalNotifications);
+        Assert.Equal(1, totalProcessed);
     }
 }

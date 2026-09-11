@@ -9,13 +9,16 @@ public class ProcessOrderCreatedEventUseCase
 {
     private readonly INotificationRepository _notificationRepository;
     private readonly IProcessedMessageRepository _processedMessageRepository;
+    private readonly IUnitOfWork _unitOfWork;
 
     public ProcessOrderCreatedEventUseCase(
         INotificationRepository notificationRepository,
-        IProcessedMessageRepository processedMessageRepository)
+        IProcessedMessageRepository processedMessageRepository,
+        IUnitOfWork unitOfWork)
     {
         _notificationRepository = notificationRepository;
         _processedMessageRepository = processedMessageRepository;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<Notification?> ExecuteAsync(
@@ -46,9 +49,22 @@ public class ProcessOrderCreatedEventUseCase
             eventType: envelope.EventType
         );
 
-        await _notificationRepository.AddAsync(notification, cancellationToken);
-        await _processedMessageRepository.AddAsync(processedMessage, cancellationToken);
+        try
+        {
+            await _notificationRepository.AddAsync(notification, cancellationToken);
+            await _processedMessageRepository.AddAsync(processedMessage, cancellationToken);
+            await _unitOfWork.CommitAsync(cancellationToken);
 
-        return notification;
+            return notification;
+        }
+        catch (Exception)
+        {
+            if (await _processedMessageRepository.ExistsAsync(envelope.EventId, cancellationToken))
+            {
+                return null;
+            }
+
+            throw;
+        }
     }
 }

@@ -18,7 +18,6 @@ public class NotificationRepository : INotificationRepository
         ArgumentNullException.ThrowIfNull(notification);
 
         await _context.Notifications.AddAsync(notification, cancellationToken);
-        await _context.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<Notification?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)

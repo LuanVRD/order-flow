@@ -29,6 +29,7 @@ public class OrderEventsConsumerTests
 
     private readonly INotificationRepository _notificationRepositoryMock;
     private readonly IProcessedMessageRepository _processedMessageRepositoryMock;
+    private readonly IUnitOfWork _unitOfWorkMock;
 
     public OrderEventsConsumerTests()
     {
@@ -41,18 +42,19 @@ public class OrderEventsConsumerTests
 
         _notificationRepositoryMock = Substitute.For<INotificationRepository>();
         _processedMessageRepositoryMock = Substitute.For<IProcessedMessageRepository>();
+        _unitOfWorkMock = Substitute.For<IUnitOfWork>();
 
         _scopeFactoryMock.CreateScope().Returns(_scopeMock);
         _scopeMock.ServiceProvider.Returns(_serviceProviderMock);
 
         _serviceProviderMock.GetService(typeof(ProcessOrderCreatedEventUseCase))
-            .Returns(new ProcessOrderCreatedEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock));
+            .Returns(new ProcessOrderCreatedEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock, _unitOfWorkMock));
         _serviceProviderMock.GetService(typeof(ProcessOrderStatusChangedEventUseCase))
-            .Returns(new ProcessOrderStatusChangedEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock));
+            .Returns(new ProcessOrderStatusChangedEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock, _unitOfWorkMock));
         _serviceProviderMock.GetService(typeof(ProcessOrderCompletedEventUseCase))
-            .Returns(new ProcessOrderCompletedEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock));
+            .Returns(new ProcessOrderCompletedEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock, _unitOfWorkMock));
         _serviceProviderMock.GetService(typeof(ProcessOrderCancelledEventUseCase))
-            .Returns(new ProcessOrderCancelledEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock));
+            .Returns(new ProcessOrderCancelledEventUseCase(_notificationRepositoryMock, _processedMessageRepositoryMock, _unitOfWorkMock));
 
         var options = new RabbitMqOptions
         {

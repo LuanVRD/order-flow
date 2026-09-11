@@ -133,8 +133,28 @@ O microsserviço de Orders publica eventos através da implementação `RabbitMq
 > - O caso de uso gravará o agregado `Order` e o registro do evento na tabela `OutboxMessages` dentro da **mesma transação relacional local** do PostgreSQL.
 > - Um processo em background (*BackgroundService* / Worker ou CDC com Debezium) fará o pooling/polling e a publicação garantida no RabbitMQ com confirmações (*publisher confirms*), assegurando semântica *at-least-once* ponta a ponta.
 
-### 4.2 Idempotência
-- O consumidor consulta e registra o `eventId` na tabela `ProcessedMessages` antes de processar, evitando duplicidade de efeitos colaterais em reentregas.
+### 4.2 Idempotência e Deduplicação Atômica (Inbox Pattern)
+
+Para garantir consistência em regimes de entrega *at-least-once* do RabbitMQ, o serviço de Notificações adota o **Inbox Pattern** com atomicidade transacional e controle de concorrência:
+
+1. **Unidade de Trabalho Compartilhada (`IUnitOfWork`)**:
+   - `Notification` e `ProcessedMessage` compartilham a mesma instância com escopo `Scoped` de `NotificationsDbContext` e `IUnitOfWork`.
+   - Os repositórios (`NotificationRepository` e `ProcessedMessageRepository`) não executam commits isolados (`SaveChangesAsync`). Eles apenas registram as entidades no Change Tracker do contexto.
+
+2. **Transação e Commit Único**:
+   - A criação da notificação e a marcação da mensagem como processada são consolidadas em uma única transação relacional e um único commit atômico no PostgreSQL (`_unitOfWork.CommitAsync()`).
+   - Se ocorrer qualquer falha durante a execução ou antes do commit (falha de rede, crash do processo, indisponibilidade de banco), nenhum dado é persistido (sem estado parcial ou registros órfãos).
+
+3. **Restrição Única / Chave Primária de `EventId`**:
+   - O campo `EventId` é configurado como chave primária (`PK`) na tabela `ProcessedMessages`. O PostgreSQL impõe a restrição de unicidade em nível de engine física.
+
+4. **Tratamento de Concorrência e Deduplicação de Mensagens**:
+   - **Checagem Rápida**: Inicialmente é executada a consulta `_processedMessageRepository.ExistsAsync(envelope.EventId)`. Se o evento já tiver sido concluído, a execução retorna imediatamente sem criar registros.
+   - **Resolução de Race Condition**: Caso duas mensagens com o mesmo `EventId` cheguem concorrentemente em nós ou threads paralelos, ambas passarão pela checagem inicial. No momento do commit, uma transação prevalecerá e a outra receberá violação de chave única. O caso de uso intercepta a exceção, detecta que o evento já foi persistido com sucesso pelo processo concorrente e absorve a colisão retornando `null` de idempotência.
+   - **Eliminação de Falsos Positivos na DLQ**: O evento concorrente concluído gera confirmação positiva (**ACK**) no RabbitMQ e **não** é encaminhado à Dead Letter Queue (DLQ), evitando alarmes falsos e retentativas desnecessárias.
+
+5. **Garantia de Confirmação (ACK Pós-Commit)**:
+   - A confirmação da mensagem (`channel.BasicAckAsync`) é executada **estritamente após** a confirmação do commit no PostgreSQL (ou após a validação de duplicidade). Falhas no commit não geram ACK, permitindo a política de retries e resiliência do broker.
 
 ### 4.3 Tratamento de Erros, Política de Retry e Dead Letter Queue (DLQ)
 

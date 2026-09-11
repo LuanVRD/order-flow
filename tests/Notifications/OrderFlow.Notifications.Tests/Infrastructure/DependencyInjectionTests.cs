@@ -36,6 +36,7 @@ public class DependencyInjectionTests
         // Assert
         provider.GetService<INotificationRepository>().Should().NotBeNull();
         provider.GetService<IProcessedMessageRepository>().Should().NotBeNull();
+        provider.GetService<IUnitOfWork>().Should().NotBeNull();
         provider.GetService<IRabbitMqConnection>().Should().NotBeNull();
         provider.GetService<IOrderEventsConsumer>().Should().NotBeNull();
     }
